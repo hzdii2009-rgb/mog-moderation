@@ -174,6 +174,43 @@ function successEmbed(title, description) {
     .setDescription(description);
 }
 
+function moderationEmbed({
+  title,
+  description,
+  target,
+  moderator,
+  reason,
+  caseNumber,
+  color
+}) {
+  return baseEmbed(color)
+    .setTitle(title)
+    .setDescription(description)
+    .setThumbnail(target.displayAvatarURL())
+    .addFields(
+      {
+        name: "User",
+        value: `${target} \`${target.user.tag}\``,
+        inline: true
+      },
+      {
+        name: "Moderator",
+        value: `${moderator}`,
+        inline: true
+      },
+      {
+        name: "Case",
+        value: caseNumber,
+        inline: true
+      },
+      {
+        name: "Reason",
+        value: reason,
+        inline: false
+      }
+    );
+}
+
 // =====================================================
 // PERMISSION CHECKS
 // =====================================================
@@ -194,22 +231,18 @@ function canModerate(executor, target) {
     return false;
   }
 
-  // Cannot moderate yourself
   if (executor.id === target.id) {
     return false;
   }
 
-  // Server owner can moderate anyone except themselves
   if (executor.id === executor.guild.ownerId) {
     return true;
   }
 
-  // Nobody can moderate the server owner
   if (target.id === target.guild.ownerId) {
     return false;
   }
 
-  // Role hierarchy
   if (
     target.roles.highest.position >=
     executor.roles.highest.position
@@ -442,28 +475,29 @@ client.once("ready", async () => {
     }).setToken(process.env.DISCORD_TOKEN);
 
     if (!process.env.CLIENT_ID) {
-      console.error("CLIENT_ID is missing from environment variables.");
+      console.error(
+        "CLIENT_ID is missing from environment variables."
+      );
       return;
     }
 
-    if (!process.env.GUILD_ID) {
-      console.error("GUILD_ID is missing from environment variables.");
-      return;
-    }
-
+    // Register commands globally.
+    // This allows Discord to recognize the bot as supporting commands.
     await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.CLIENT_ID,
-        process.env.GUILD_ID
+      Routes.applicationCommands(
+        process.env.CLIENT_ID
       ),
       {
         body: slashCommands
       }
     );
 
-    console.log("Slash commands registered.");
+    console.log("Global slash commands registered.");
   } catch (error) {
-    console.error("Error registering slash commands:", error);
+    console.error(
+      "Error registering global slash commands:",
+      error
+    );
   }
 });
 
@@ -533,7 +567,7 @@ client.on("interactionCreate", async interaction => {
   const member = interaction.member;
 
   // ===================================================
-  // /commands
+  // /COMMANDS
   // ===================================================
 
   if (command === "commands") {
@@ -634,6 +668,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "warn") {
     const target = interaction.options.getMember("user");
+
     const reason =
       interaction.options.getString("reason") ||
       "No reason provided";
@@ -737,6 +772,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "kick") {
     const target = interaction.options.getMember("user");
+
     const reason =
       interaction.options.getString("reason") ||
       "No reason provided";
@@ -846,6 +882,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "ban") {
     const target = interaction.options.getMember("user");
+
     const reason =
       interaction.options.getString("reason") ||
       "No reason provided";
@@ -957,6 +994,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "mute") {
     const target = interaction.options.getMember("user");
+
     const durationInput =
       interaction.options.getString("duration");
 
@@ -1219,7 +1257,10 @@ client.on("messageCreate", async message => {
     return;
   }
 
-  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const args = message.content
+    .slice(PREFIX.length)
+    .trim()
+    .split(/\s+/);
 
   const command = args.shift()?.toLowerCase();
 
@@ -1829,6 +1870,7 @@ if (!process.env.DISCORD_TOKEN) {
   console.error(
     "DISCORD_TOKEN is missing from environment variables."
   );
+
   process.exit(1);
 }
 

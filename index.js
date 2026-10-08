@@ -266,6 +266,16 @@ function botCanModerate(guild, target) {
   );
 }
 
+function botCanManageRole(guild, role) {
+  const botMember = guild.members.me;
+
+  if (!botMember || !role) {
+    return false;
+  }
+
+  return role.position < botMember.roles.highest.position;
+}
+
 // =====================================================
 // LOGGING
 // =====================================================
@@ -338,6 +348,19 @@ const slashCommands = [
   },
 
   {
+    name: "unwarn",
+    description: "Remove a member's most recent warning",
+    options: [
+      {
+        name: "user",
+        description: "The member whose latest warning should be removed",
+        type: 6,
+        required: true
+      }
+    ]
+  },
+
+  {
     name: "kick",
     description: "Kick a member",
     options: [
@@ -376,6 +399,25 @@ const slashCommands = [
   },
 
   {
+    name: "unban",
+    description: "Unban a user by their Discord ID",
+    options: [
+      {
+        name: "userid",
+        description: "The Discord ID of the banned user",
+        type: 3,
+        required: true
+      },
+      {
+        name: "reason",
+        description: "Reason for the unban",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
     name: "mute",
     description: "Timeout a member",
     options: [
@@ -396,6 +438,63 @@ const slashCommands = [
         description: "Reason for the mute",
         type: 3,
         required: false
+      }
+    ]
+  },
+
+  {
+    name: "unmute",
+    description: "Remove a member's timeout",
+    options: [
+      {
+        name: "user",
+        description: "The member to unmute",
+        type: 6,
+        required: true
+      },
+      {
+        name: "reason",
+        description: "Reason for the unmute",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "role",
+    description: "Give a role to a member",
+    options: [
+      {
+        name: "user",
+        description: "The member to give the role to",
+        type: 6,
+        required: true
+      },
+      {
+        name: "role",
+        description: "The role to give",
+        type: 8,
+        required: true
+      }
+    ]
+  },
+
+  {
+    name: "unrole",
+    description: "Remove a role from a member",
+    options: [
+      {
+        name: "user",
+        description: "The member to remove the role from",
+        type: 6,
+        required: true
+      },
+      {
+        name: "role",
+        description: "The role to remove",
+        type: 8,
+        required: true
       }
     ]
   },
@@ -481,8 +580,6 @@ client.once("ready", async () => {
       return;
     }
 
-    // Register commands globally.
-    // This allows Discord to recognize the bot as supporting commands.
     await rest.put(
       Routes.applicationCommands(
         process.env.CLIENT_ID
@@ -593,9 +690,14 @@ client.on("interactionCreate", async interaction => {
           name: "🛡️ Moderation",
           value:
             "`/warn @user [reason]`\n" +
+            "`/unwarn @user`\n" +
             "`/kick @user [reason]`\n" +
             "`/ban @user [reason]`\n" +
-            "`/mute @user <duration> [reason]`"
+            "`/unban <userid> [reason]`\n" +
+            "`/mute @user <duration> [reason]`\n" +
+            "`/unmute @user [reason]`\n" +
+            "`/role @user @role`\n" +
+            "`/unrole @user @role`"
         },
         {
           name: "👋 Join DM",
@@ -608,9 +710,14 @@ client.on("interactionCreate", async interaction => {
           name: "⌨️ Prefix Commands",
           value:
             "`?warn @user [reason]`\n" +
+            "`?unwarn @user`\n" +
             "`?kick @user [reason]`\n" +
             "`?ban @user [reason]`\n" +
+            "`?unban <userid> [reason]`\n" +
             "`?mute @user <duration> [reason]`\n" +
+            "`?unmute @user [reason]`\n" +
+            "`?role @user @role`\n" +
+            "`?unrole @user @role`\n" +
             "`?joindm <message>`\n" +
             "`?editjoindm <message>`\n" +
             "`?stopjoindm`"
@@ -641,9 +748,14 @@ client.on("interactionCreate", async interaction => {
   if (
     [
       "warn",
+      "unwarn",
       "kick",
       "ban",
+      "unban",
       "mute",
+      "unmute",
+      "role",
+      "unrole",
       "joindm",
       "editjoindm",
       "stopjoindm"
@@ -762,6 +874,84 @@ client.on("interactionCreate", async interaction => {
     } catch {
       // User has DMs disabled
     }
+
+    return;
+  }
+
+  // ===================================================
+  // /UNWARN
+  // ===================================================
+
+  if (command === "unwarn") {
+    const target = interaction.options.getMember("user");
+
+    if (!target) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "I couldn't find that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Remove Warning",
+            "You cannot remove a warning from yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const userWarnings = getUserWarnings(
+      interaction.guild.id,
+      target.id
+    );
+
+    if (userWarnings.length === 0) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "No Warnings",
+            `${target} does not have any warnings to remove.`
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const removedWarning =
+      userWarnings.pop();
+
+    saveWarnings();
+
+    const caseNumber = getCaseNumber();
+
+    const embed = moderationEmbed({
+      title: "↩️ Warning Removed",
+      description: `The most recent warning for ${target} has been removed.`,
+      target,
+      moderator: interaction.user,
+      reason: `Removed warning ${removedWarning.case}`,
+      caseNumber,
+      color: COLORS.success
+    }).addFields({
+      name: "Warnings Remaining",
+      value: `**${userWarnings.length}**`,
+      inline: true
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
 
     return;
   }
@@ -989,6 +1179,132 @@ client.on("interactionCreate", async interaction => {
   }
 
   // ===================================================
+  // /UNBAN
+  // ===================================================
+
+  if (command === "unban") {
+    const userId =
+      interaction.options.getString("userid");
+
+    const reason =
+      interaction.options.getString("reason") ||
+      "No reason provided";
+
+    if (!/^\d{17,20}$/.test(userId)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid User ID",
+            "Please provide a valid Discord user ID."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !interaction.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.BanMembers
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Ban Members** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    let bannedUser;
+
+    try {
+      bannedUser =
+        await interaction.guild.bans.fetch(userId);
+    } catch {
+      bannedUser = null;
+    }
+
+    if (!bannedUser) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Banned",
+            "That user is not currently banned from this server."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    const embed = baseEmbed(COLORS.success)
+      .setTitle("↩️ Member Unbanned")
+      .setDescription(
+        `<@${userId}> has been unbanned from the server.`
+      )
+      .setThumbnail(
+        bannedUser.user.displayAvatarURL()
+      )
+      .addFields(
+        {
+          name: "User",
+          value: `${bannedUser.user} \`${bannedUser.user.tag}\``,
+          inline: true
+        },
+        {
+          name: "Moderator",
+          value: `${interaction.user}`,
+          inline: true
+        },
+        {
+          name: "Case",
+          value: caseNumber,
+          inline: true
+        },
+        {
+          name: "Reason",
+          value: reason,
+          inline: false
+        }
+      )
+      .setTimestamp()
+      .setFooter({
+        text: "Mog Moderation"
+      });
+
+    try {
+      await interaction.guild.members.unban(
+        userId,
+        reason
+      );
+    } catch (error) {
+      console.error("Unban error:", error);
+
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Unban Failed",
+            "I couldn't unban that user. Check my permissions and try again."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
   // /MUTE
   // ===================================================
 
@@ -1142,6 +1458,427 @@ client.on("interactionCreate", async interaction => {
   }
 
   // ===================================================
+  // /UNMUTE
+  // ===================================================
+
+  if (command === "unmute") {
+    const target =
+      interaction.options.getMember("user");
+
+    const reason =
+      interaction.options.getString("reason") ||
+      "No reason provided";
+
+    if (!target) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "I couldn't find that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Unmute User",
+            "You cannot unmute yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!botCanModerate(interaction.guild, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !interaction.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Moderate Members** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!target.communicationDisabledUntilTimestamp) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Muted",
+            `${target} is not currently timed out.`
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    try {
+      await target.timeout(null, reason);
+    } catch (error) {
+      console.error("Unmute error:", error);
+
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Unmute Failed",
+            "I couldn't remove the timeout from that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const embed = moderationEmbed({
+      title: "🔊 Member Unmuted",
+      description: `${target} is no longer timed out.`,
+      target,
+      moderator: interaction.user,
+      reason,
+      caseNumber,
+      color: COLORS.success
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // /ROLE
+  // ===================================================
+
+  if (command === "role") {
+    const target =
+      interaction.options.getMember("user");
+
+    const role =
+      interaction.options.getRole("role");
+
+    if (!target || !role) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Information",
+            "Please provide both a member and a role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Manage User",
+            "You cannot manage yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (role.id === interaction.guild.id) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid Role",
+            "The `@everyone` role cannot be assigned."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (role.managed) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Managed Role",
+            "I cannot manually assign an integration/bot managed role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !member.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Manage Roles** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!botCanManageRole(interaction.guild, role)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My highest role must be higher than the role you are trying to give."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      member.id !== interaction.guild.ownerId &&
+      role.position >= member.roles.highest.position
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "You cannot give a role that is equal to or higher than your highest role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (target.roles.cache.has(role.id)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Already Assigned",
+            `${target} already has ${role}.`
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    try {
+      await target.roles.add(
+        role,
+        `Role added by ${interaction.user.tag}`
+      );
+    } catch (error) {
+      console.error("Role add error:", error);
+
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Failed",
+            "I couldn't give that role to the member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const embed = moderationEmbed({
+      title: "🎭 Role Added",
+      description: `${role} has been added to ${target}.`,
+      target,
+      moderator: interaction.user,
+      reason: `Added role: ${role.name}`,
+      caseNumber,
+      color: COLORS.success
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // /UNROLE
+  // ===================================================
+
+  if (command === "unrole") {
+    const target =
+      interaction.options.getMember("user");
+
+    const role =
+      interaction.options.getRole("role");
+
+    if (!target || !role) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Information",
+            "Please provide both a member and a role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Manage User",
+            "You cannot manage yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (role.id === interaction.guild.id) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid Role",
+            "The `@everyone` role cannot be removed."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (role.managed) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Managed Role",
+            "I cannot manually remove an integration/bot managed role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !member.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Manage Roles** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!botCanManageRole(interaction.guild, role)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My highest role must be higher than the role you are trying to remove."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      member.id !== interaction.guild.ownerId &&
+      role.position >= member.roles.highest.position
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "You cannot remove a role that is equal to or higher than your highest role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!target.roles.cache.has(role.id)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Not Found",
+            `${target} does not have ${role}.`
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    try {
+      await target.roles.remove(
+        role,
+        `Role removed by ${interaction.user.tag}`
+      );
+    } catch (error) {
+      console.error("Role remove error:", error);
+
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Removal Failed",
+            "I couldn't remove that role from the member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const embed = moderationEmbed({
+      title: "🎭 Role Removed",
+      description: `${role} has been removed from ${target}.`,
+      target,
+      moderator: interaction.user,
+      reason: `Removed role: ${role.name}`,
+      caseNumber,
+      color: COLORS.success
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
   // /JOINDM
   // ===================================================
 
@@ -1272,9 +2009,14 @@ client.on("messageCreate", async message => {
 
   const moderationCommands = [
     "warn",
+    "unwarn",
     "kick",
     "ban",
+    "unban",
     "mute",
+    "unmute",
+    "role",
+    "unrole",
     "joindm",
     "editjoindm",
     "stopjoindm"
@@ -1319,9 +2061,14 @@ client.on("messageCreate", async message => {
           name: "🛡️ Moderation",
           value:
             "`/warn @user [reason]`\n" +
+            "`/unwarn @user`\n" +
             "`/kick @user [reason]`\n" +
             "`/ban @user [reason]`\n" +
-            "`/mute @user <duration> [reason]`"
+            "`/unban <userid> [reason]`\n" +
+            "`/mute @user <duration> [reason]`\n" +
+            "`/unmute @user [reason]`\n" +
+            "`/role @user @role`\n" +
+            "`/unrole @user @role`"
         },
         {
           name: "👋 Join DM",
@@ -1334,9 +2081,14 @@ client.on("messageCreate", async message => {
           name: "⌨️ Prefix Commands",
           value:
             "`?warn @user [reason]`\n" +
+            "`?unwarn @user`\n" +
             "`?kick @user [reason]`\n" +
             "`?ban @user [reason]`\n" +
+            "`?unban <userid> [reason]`\n" +
             "`?mute @user <duration> [reason]`\n" +
+            "`?unmute @user [reason]`\n" +
+            "`?role @user @role`\n" +
+            "`?unrole @user @role`\n" +
             "`?joindm <message>`\n" +
             "`?editjoindm <message>`\n" +
             "`?stopjoindm`"
@@ -1419,6 +2171,82 @@ client.on("messageCreate", async message => {
       color: COLORS.warning
     }).addFields({
       name: "Total Warnings",
+      value: `**${userWarnings.length}**`,
+      inline: true
+    });
+
+    await message.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(message.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // ?UNWARN
+  // ===================================================
+
+  if (command === "unwarn") {
+    const target =
+      message.mentions.members.first();
+
+    if (!target) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "Mention a member to remove their latest warning.\n\nExample: `?unwarn @user`"
+          )
+        ]
+      });
+    }
+
+    if (!canModerate(message.member, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Remove Warning",
+            "You cannot remove a warning from yourself, the server owner, or a member with an equal/higher role."
+          )
+        ]
+      });
+    }
+
+    const userWarnings = getUserWarnings(
+      message.guild.id,
+      target.id
+    );
+
+    if (userWarnings.length === 0) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "No Warnings",
+            `${target} does not have any warnings to remove.`
+          )
+        ]
+      });
+    }
+
+    const removedWarning =
+      userWarnings.pop();
+
+    saveWarnings();
+
+    const caseNumber = getCaseNumber();
+
+    const embed = moderationEmbed({
+      title: "↩️ Warning Removed",
+      description: `The most recent warning for ${target} has been removed.`,
+      target,
+      moderator: message.author,
+      reason: `Removed warning ${removedWarning.case}`,
+      caseNumber,
+      color: COLORS.success
+    }).addFields({
+      name: "Warnings Remaining",
       value: `**${userWarnings.length}**`,
       inline: true
     });
@@ -1601,6 +2429,144 @@ client.on("messageCreate", async message => {
   }
 
   // ===================================================
+  // ?UNBAN
+  // ===================================================
+
+  if (command === "unban") {
+    const rawId = args[0];
+
+    if (!rawId) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing User ID",
+            "Use the user's Discord ID.\n\nExample: `?unban 123456789012345678`"
+          )
+        ]
+      });
+    }
+
+    const userIdMatch =
+      rawId.match(/\d{17,20}/);
+
+    const userId =
+      userIdMatch ? userIdMatch[0] : null;
+
+    if (!userId) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid User ID",
+            "Please provide a valid Discord user ID."
+          )
+        ]
+      });
+    }
+
+    if (
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.BanMembers
+      )
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Ban Members** permission."
+          )
+        ]
+      });
+    }
+
+    let bannedUser;
+
+    try {
+      bannedUser =
+        await message.guild.bans.fetch(userId);
+    } catch {
+      bannedUser = null;
+    }
+
+    if (!bannedUser) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Banned",
+            "That user is not currently banned from this server."
+          )
+        ]
+      });
+    }
+
+    const reason =
+      args.slice(1).join(" ") ||
+      "No reason provided";
+
+    const caseNumber = getCaseNumber();
+
+    const embed = baseEmbed(COLORS.success)
+      .setTitle("↩️ Member Unbanned")
+      .setDescription(
+        `<@${userId}> has been unbanned from the server.`
+      )
+      .setThumbnail(
+        bannedUser.user.displayAvatarURL()
+      )
+      .addFields(
+        {
+          name: "User",
+          value: `${bannedUser.user} \`${bannedUser.user.tag}\``,
+          inline: true
+        },
+        {
+          name: "Moderator",
+          value: `${message.author}`,
+          inline: true
+        },
+        {
+          name: "Case",
+          value: caseNumber,
+          inline: true
+        },
+        {
+          name: "Reason",
+          value: reason,
+          inline: false
+        }
+      )
+      .setTimestamp()
+      .setFooter({
+        text: "Mog Moderation"
+      });
+
+    try {
+      await message.guild.members.unban(
+        userId,
+        reason
+      );
+    } catch (error) {
+      console.error("Unban error:", error);
+
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Unban Failed",
+            "I couldn't unban that user. Check my permissions and try again."
+          )
+        ]
+      });
+    }
+
+    await message.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(message.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
   // ?MUTE
   // ===================================================
 
@@ -1716,6 +2682,403 @@ client.on("messageCreate", async message => {
       name: "Duration",
       value: durationInput,
       inline: true
+    });
+
+    await message.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(message.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // ?UNMUTE
+  // ===================================================
+
+  if (command === "unmute") {
+    const target =
+      message.mentions.members.first();
+
+    const reason =
+      args.slice(1).join(" ") ||
+      "No reason provided";
+
+    if (!target) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "Mention a member to unmute.\n\nExample: `?unmute @user`"
+          )
+        ]
+      });
+    }
+
+    if (!canModerate(message.member, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Unmute User",
+            "You cannot unmute yourself, the server owner, or a member with an equal/higher role."
+          )
+        ]
+      });
+    }
+
+    if (!botCanModerate(message.guild, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ]
+      });
+    }
+
+    if (
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Moderate Members** permission."
+          )
+        ]
+      });
+    }
+
+    if (!target.communicationDisabledUntilTimestamp) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Muted",
+            `${target} is not currently timed out.`
+          )
+        ]
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    try {
+      await target.timeout(null, reason);
+    } catch (error) {
+      console.error("Unmute error:", error);
+
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Unmute Failed",
+            "I couldn't remove the timeout from that member."
+          )
+        ]
+      });
+    }
+
+    const embed = moderationEmbed({
+      title: "🔊 Member Unmuted",
+      description: `${target} is no longer timed out.`,
+      target,
+      moderator: message.author,
+      reason,
+      caseNumber,
+      color: COLORS.success
+    });
+
+    await message.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(message.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // ?ROLE
+  // ===================================================
+
+  if (command === "role") {
+    const target =
+      message.mentions.members.first();
+
+    const role =
+      message.mentions.roles.first();
+
+    if (!target || !role) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Information",
+            "Mention a member and a role.\n\nExample: `?role @user @role`"
+          )
+        ]
+      });
+    }
+
+    if (!canModerate(message.member, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Manage User",
+            "You cannot manage yourself, the server owner, or a member with an equal/higher role."
+          )
+        ]
+      });
+    }
+
+    if (role.id === message.guild.id) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid Role",
+            "The `@everyone` role cannot be assigned."
+          )
+        ]
+      });
+    }
+
+    if (role.managed) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Managed Role",
+            "I cannot manually assign an integration/bot managed role."
+          )
+        ]
+      });
+    }
+
+    if (
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Manage Roles** permission."
+          )
+        ]
+      });
+    }
+
+    if (!botCanManageRole(message.guild, role)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My highest role must be higher than the role you are trying to give."
+          )
+        ]
+      });
+    }
+
+    if (
+      message.member.id !== message.guild.ownerId &&
+      role.position >= message.member.roles.highest.position
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "You cannot give a role that is equal to or higher than your highest role."
+          )
+        ]
+      });
+    }
+
+    if (target.roles.cache.has(role.id)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Already Assigned",
+            `${target} already has ${role}.`
+          )
+        ]
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    try {
+      await target.roles.add(
+        role,
+        `Role added by ${message.author.tag}`
+      );
+    } catch (error) {
+      console.error("Role add error:", error);
+
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Failed",
+            "I couldn't give that role to the member."
+          )
+        ]
+      });
+    }
+
+    const embed = moderationEmbed({
+      title: "🎭 Role Added",
+      description: `${role} has been added to ${target}.`,
+      target,
+      moderator: message.author,
+      reason: `Added role: ${role.name}`,
+      caseNumber,
+      color: COLORS.success
+    });
+
+    await message.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(message.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // ?UNROLE
+  // ===================================================
+
+  if (command === "unrole") {
+    const target =
+      message.mentions.members.first();
+
+    const role =
+      message.mentions.roles.first();
+
+    if (!target || !role) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Information",
+            "Mention a member and a role.\n\nExample: `?unrole @user @role`"
+          )
+        ]
+      });
+    }
+
+    if (!canModerate(message.member, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Manage User",
+            "You cannot manage yourself, the server owner, or a member with an equal/higher role."
+          )
+        ]
+      });
+    }
+
+    if (role.id === message.guild.id) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid Role",
+            "The `@everyone` role cannot be removed."
+          )
+        ]
+      });
+    }
+
+    if (role.managed) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Managed Role",
+            "I cannot manually remove an integration/bot managed role."
+          )
+        ]
+      });
+    }
+
+    if (
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Manage Roles** permission."
+          )
+        ]
+      });
+    }
+
+    if (!botCanManageRole(message.guild, role)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My highest role must be higher than the role you are trying to remove."
+          )
+        ]
+      });
+    }
+
+    if (
+      message.member.id !== message.guild.ownerId &&
+      role.position >= message.member.roles.highest.position
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "You cannot remove a role that is equal to or higher than your highest role."
+          )
+        ]
+      });
+    }
+
+    if (!target.roles.cache.has(role.id)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Not Found",
+            `${target} does not have ${role}.`
+          )
+        ]
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    try {
+      await target.roles.remove(
+        role,
+        `Role removed by ${message.author.tag}`
+      );
+    } catch (error) {
+      console.error("Role remove error:", error);
+
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Removal Failed",
+            "I couldn't remove that role from the member."
+          )
+        ]
+      });
+    }
+
+    const embed = moderationEmbed({
+      title: "🎭 Role Removed",
+      description: `${role} has been removed from ${target}.`,
+      target,
+      moderator: message.author,
+      reason: `Removed role: ${role.name}`,
+      caseNumber,
+      color: COLORS.success
     });
 
     await message.reply({

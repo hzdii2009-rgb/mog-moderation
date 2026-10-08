@@ -13,9 +13,9 @@ const {
   Routes
 } = require("discord.js");
 
-// =========================
+// =====================================================
 // CONFIG
-// =========================
+// =====================================================
 
 const PREFIX = "?";
 const LOG_CHANNEL_NAME = "mod-logs";
@@ -32,24 +32,37 @@ const client = new Client({
   ]
 });
 
-// =========================
-// WARNING STORAGE
-// =========================
+// =====================================================
+// FILE SETUP
+// =====================================================
+
+function ensureFile(file, defaultData = {}) {
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(
+      file,
+      JSON.stringify(defaultData, null, 2)
+    );
+  }
+}
+
+ensureFile(WARNINGS_FILE, {});
+ensureFile(JOINDM_FILE, {});
+
+// =====================================================
+// WARNINGS
+// =====================================================
 
 function loadWarnings() {
   try {
-    if (!fs.existsSync(WARNINGS_FILE)) {
-      fs.writeFileSync(WARNINGS_FILE, "{}");
+    const data = fs.readFileSync(WARNINGS_FILE, "utf8");
+
+    if (!data.trim()) {
       return {};
     }
 
-    const data = fs.readFileSync(WARNINGS_FILE, "utf8");
-
-    if (!data.trim()) return {};
-
     return JSON.parse(data);
   } catch (error) {
-    console.error("Could not load warnings.json:", error);
+    console.error("Error loading warnings.json:", error);
     return {};
   }
 }
@@ -63,7 +76,7 @@ function saveWarnings() {
       JSON.stringify(warnings, null, 2)
     );
   } catch (error) {
-    console.error("Could not save warnings:", error);
+    console.error("Error saving warnings.json:", error);
   }
 }
 
@@ -79,67 +92,54 @@ function getUserWarnings(guildId, userId) {
   return warnings[guildId][userId];
 }
 
-// =========================
-// JOIN DM STORAGE
-// =========================
+// =====================================================
+// JOIN DM
+// =====================================================
 
-function loadJoinDMs() {
+function loadJoinDM() {
   try {
-    if (!fs.existsSync(JOINDM_FILE)) {
-      fs.writeFileSync(JOINDM_FILE, "{}");
+    const data = fs.readFileSync(JOINDM_FILE, "utf8");
+
+    if (!data.trim()) {
       return {};
     }
 
-    const data = fs.readFileSync(JOINDM_FILE, "utf8");
-
-    if (!data.trim()) return {};
-
     return JSON.parse(data);
   } catch (error) {
-    console.error("Could not load joindm.json:", error);
+    console.error("Error loading joindm.json:", error);
     return {};
   }
 }
 
-let joinDMs = loadJoinDMs();
+let joinDM = loadJoinDM();
 
-function saveJoinDMs() {
+function saveJoinDM() {
   try {
     fs.writeFileSync(
       JOINDM_FILE,
-      JSON.stringify(joinDMs, null, 2)
+      JSON.stringify(joinDM, null, 2)
     );
   } catch (error) {
-    console.error("Could not save joindm.json:", error);
+    console.error("Error saving joindm.json:", error);
   }
 }
 
-function getJoinDMSettings(guildId) {
-  if (!joinDMs[guildId]) {
-    joinDMs[guildId] = {
-      enabled: false,
-      message: ""
-    };
-  }
-
-  return joinDMs[guildId];
-}
-
-// =========================
+// =====================================================
 // CASE NUMBERS
-// =========================
+// =====================================================
 
 let nextCase = 1;
 
 function getCaseNumber() {
   const number = String(nextCase).padStart(4, "0");
   nextCase++;
+
   return "#" + number;
 }
 
-// =========================
+// =====================================================
 // COLORS
-// =========================
+// =====================================================
 
 const COLORS = {
   success: 0x57F287,
@@ -149,104 +149,36 @@ const COLORS = {
   neutral: 0x2B2D31
 };
 
-// =========================
+// =====================================================
 // EMBEDS
-// =========================
+// =====================================================
 
 function baseEmbed(color = COLORS.info) {
-  const embed = new EmbedBuilder()
+  return new EmbedBuilder()
     .setColor(color)
     .setTimestamp()
     .setFooter({
       text: "Mog Moderation"
     });
-
-  if (client.user) {
-    embed.setAuthor({
-      name: "MOG MODERATION",
-      iconURL: client.user.displayAvatarURL()
-    });
-  } else {
-    embed.setAuthor({
-      name: "MOG MODERATION"
-    });
-  }
-
-  return embed;
-}
-
-function successEmbed(title, description, fields = []) {
-  const embed = baseEmbed(COLORS.success)
-    .setTitle(title)
-    .setDescription(description);
-
-  if (fields.length) {
-    embed.addFields(fields);
-  }
-
-  return embed;
 }
 
 function errorEmbed(title, description) {
   return baseEmbed(COLORS.danger)
-    .setTitle(title)
+    .setTitle(`❌ ${title}`)
     .setDescription(description);
 }
 
-function infoEmbed(title, description, fields = []) {
-  const embed = baseEmbed(COLORS.info)
-    .setTitle(title)
+function successEmbed(title, description) {
+  return baseEmbed(COLORS.success)
+    .setTitle(`✅ ${title}`)
     .setDescription(description);
-
-  if (fields.length) {
-    embed.addFields(fields);
-  }
-
-  return embed;
 }
 
-function moderationEmbed({
-  title,
-  description,
-  target,
-  moderator,
-  reason,
-  caseNumber,
-  color
-}) {
-  return baseEmbed(color)
-    .setTitle(title)
-    .setDescription(description)
-    .addFields(
-      {
-        name: "User",
-        value: `${target}\n\`${target.id}\``,
-        inline: true
-      },
-      {
-        name: "Moderator",
-        value: `${moderator}`,
-        inline: true
-      },
-      {
-        name: "Case",
-        value: `\`${caseNumber}\``,
-        inline: true
-      },
-      {
-        name: "Reason",
-        value: reason || "No reason provided",
-        inline: false
-      }
-    )
-    .setThumbnail(target.displayAvatarURL());
-}
-
-// =========================
+// =====================================================
 // PERMISSION CHECKS
-// =========================
+// =====================================================
 
-function isAdmin(member) {
+function isModerator(member) {
   if (!member) return false;
 
   return (
@@ -258,20 +190,26 @@ function isAdmin(member) {
 }
 
 function canModerate(executor, target) {
-  if (!target) return false;
+  if (!executor || !target) {
+    return false;
+  }
 
+  // Cannot moderate yourself
   if (executor.id === target.id) {
     return false;
   }
 
+  // Server owner can moderate anyone except themselves
   if (executor.id === executor.guild.ownerId) {
     return true;
   }
 
+  // Nobody can moderate the server owner
   if (target.id === target.guild.ownerId) {
     return false;
   }
 
+  // Role hierarchy
   if (
     target.roles.highest.position >=
     executor.roles.highest.position
@@ -295,72 +233,177 @@ function botCanModerate(guild, target) {
   );
 }
 
-// =========================
+// =====================================================
 // LOGGING
-// =========================
+// =====================================================
 
 async function sendLog(guild, embed) {
   try {
-    let logChannel = guild.channels.cache.find(
-      channel =>
-        channel.name === LOG_CHANNEL_NAME &&
-        channel.isTextBased()
+    const channel = guild.channels.cache.find(
+      ch =>
+        ch.name === LOG_CHANNEL_NAME &&
+        ch.isTextBased()
     );
 
-    if (!logChannel) {
-      const channels = await guild.channels.fetch();
-
-      logChannel = channels.find(
-        channel =>
-          channel &&
-          channel.name === LOG_CHANNEL_NAME &&
-          channel.isTextBased()
-      );
-    }
-
-    if (!logChannel) {
-      console.error(
-        `❌ Could not find #${LOG_CHANNEL_NAME} in ${guild.name}.`
+    if (!channel) {
+      console.log(
+        `#${LOG_CHANNEL_NAME} was not found in ${guild.name}`
       );
       return;
     }
 
-    const permissions =
-      logChannel.permissionsFor(guild.members.me);
-
-    if (
-      !permissions ||
-      !permissions.has(
-        PermissionsBitField.Flags.ViewChannel
-      ) ||
-      !permissions.has(
-        PermissionsBitField.Flags.SendMessages
-      )
-    ) {
-      console.error(
-        `❌ I cannot send messages in #${LOG_CHANNEL_NAME}.`
-      );
-      return;
-    }
-
-    await logChannel.send({
+    await channel.send({
       embeds: [embed]
     });
-
-    console.log(
-      `✅ Moderation log sent to #${LOG_CHANNEL_NAME}`
-    );
   } catch (error) {
-    console.error(
-      "❌ Could not send moderation log:",
-      error
-    );
+    console.error("Could not send moderation log:", error);
   }
 }
 
-// =========================
+// =====================================================
+// JOIN DM VARIABLES
+// =====================================================
+
+function replaceJoinVariables(message, member) {
+  return message
+    .replace(/\{user\}/gi, `<@${member.id}>`)
+    .replace(/\{username\}/gi, member.user.username)
+    .replace(/\{server\}/gi, member.guild.name)
+    .replace(
+      /\{membercount\}/gi,
+      String(member.guild.memberCount)
+    );
+}
+
+// =====================================================
+// SLASH COMMANDS
+// =====================================================
+
+const slashCommands = [
+  {
+    name: "commands",
+    description: "Show all Mog Moderation commands"
+  },
+
+  {
+    name: "warn",
+    description: "Warn a member",
+    options: [
+      {
+        name: "user",
+        description: "The member to warn",
+        type: 6,
+        required: true
+      },
+      {
+        name: "reason",
+        description: "Reason for the warning",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "kick",
+    description: "Kick a member",
+    options: [
+      {
+        name: "user",
+        description: "The member to kick",
+        type: 6,
+        required: true
+      },
+      {
+        name: "reason",
+        description: "Reason for the kick",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "ban",
+    description: "Ban a member",
+    options: [
+      {
+        name: "user",
+        description: "The member to ban",
+        type: 6,
+        required: true
+      },
+      {
+        name: "reason",
+        description: "Reason for the ban",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "mute",
+    description: "Timeout a member",
+    options: [
+      {
+        name: "user",
+        description: "The member to mute",
+        type: 6,
+        required: true
+      },
+      {
+        name: "duration",
+        description: "Duration such as 10m, 1h, 1d",
+        type: 3,
+        required: true
+      },
+      {
+        name: "reason",
+        description: "Reason for the mute",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "joindm",
+    description: "Set the automatic welcome DM",
+    options: [
+      {
+        name: "message",
+        description:
+          "Message. Variables: {user}, {username}, {server}, {membercount}",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+
+  {
+    name: "editjoindm",
+    description: "Edit the automatic welcome DM",
+    options: [
+      {
+        name: "message",
+        description:
+          "New message. Variables: {user}, {username}, {server}, {membercount}",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+
+  {
+    name: "stopjoindm",
+    description: "Disable the automatic welcome DM"
+  }
+];
+
+// =====================================================
 // DURATION PARSER
-// =========================
+// =====================================================
 
 function parseDuration(input) {
   if (!input) return null;
@@ -368,7 +411,7 @@ function parseDuration(input) {
   const match = input
     .toLowerCase()
     .trim()
-    .match(/^(\d+)(s|m|h|d)$/);
+    .match(/^(\d+)(s|m|h|d|w)$/);
 
   if (!match) return null;
 
@@ -379,504 +422,963 @@ function parseDuration(input) {
     s: 1000,
     m: 60 * 1000,
     h: 60 * 60 * 1000,
-    d: 24 * 60 * 60 * 1000
+    d: 24 * 60 * 60 * 1000,
+    w: 7 * 24 * 60 * 60 * 1000
   };
 
-  const duration = amount * multipliers[unit];
-
-  if (
-    duration >
-    28 * 24 * 60 * 60 * 1000
-  ) {
-    return null;
-  }
-
-  return duration;
+  return amount * multipliers[unit];
 }
 
-// =========================
-// JOIN DM MESSAGE
-// =========================
-
-function formatJoinDMMessage(message, member) {
-  if (!message) return "";
-
-  return message
-    .replace(/{user}/gi, `<@${member.id}>`)
-    .replace(/{username}/gi, member.user.username)
-    .replace(/{server}/gi, member.guild.name)
-    .replace(/{membercount}/gi, String(member.guild.memberCount));
-}
-
-async function sendJoinDM(member) {
-  try {
-    const settings = getJoinDMSettings(
-      member.guild.id
-    );
-
-    if (!settings.enabled) {
-      return;
-    }
-
-    if (!settings.message) {
-      return;
-    }
-
-    const formattedMessage =
-      formatJoinDMMessage(
-        settings.message,
-        member
-      );
-
-    await member.send({
-      embeds: [
-        baseEmbed(COLORS.info)
-          .setTitle(
-            `Welcome to ${member.guild.name}!`
-          )
-          .setDescription(formattedMessage)
-          .setThumbnail(
-            member.user.displayAvatarURL()
-          )
-      ]
-    });
-
-    console.log(
-      `✅ Join DM sent to ${member.user.tag}`
-    );
-  } catch (error) {
-    console.log(
-      `⚠️ Could not DM ${member.user.tag}. Their DMs may be closed.`
-    );
-  }
-}
-
-// =========================
-// JOIN EVENT
-// =========================
-
-client.on("guildMemberAdd", async member => {
-  await sendJoinDM(member);
-});
-
-// =========================
+// =====================================================
 // READY
-// =========================
+// =====================================================
 
 client.once("ready", async () => {
-  console.log(
-    `Logged in as ${client.user.tag}`
-  );
-
-  const commands = [
-    {
-      name: "ban",
-      description: "Ban a member",
-      options: [
-        {
-          name: "user",
-          description: "The member to ban",
-          type: 6,
-          required: true
-        },
-        {
-          name: "reason",
-          description: "Reason for the ban",
-          type: 3,
-          required: false
-        }
-      ]
-    },
-
-    {
-      name: "kick",
-      description: "Kick a member",
-      options: [
-        {
-          name: "user",
-          description: "The member to kick",
-          type: 6,
-          required: true
-        },
-        {
-          name: "reason",
-          description: "Reason for the kick",
-          type: 3,
-          required: false
-        }
-      ]
-    },
-
-    {
-      name: "mute",
-      description: "Timeout a member",
-      options: [
-        {
-          name: "user",
-          description: "The member to mute",
-          type: 6,
-          required: true
-        },
-        {
-          name: "duration",
-          description: "Example: 10m, 2h, 1d",
-          type: 3,
-          required: true
-        },
-        {
-          name: "reason",
-          description: "Reason for the mute",
-          type: 3,
-          required: false
-        }
-      ]
-    },
-
-    {
-      name: "warn",
-      description: "Warn a member",
-      options: [
-        {
-          name: "user",
-          description: "The member to warn",
-          type: 6,
-          required: true
-        },
-        {
-          name: "reason",
-          description: "Reason for the warning",
-          type: 3,
-          required: false
-        }
-      ]
-    },
-
-    {
-      name: "joindm",
-      description: "Enable join DMs with a message",
-      options: [
-        {
-          name: "message",
-          description:
-            "Message sent to users when they join",
-          type: 3,
-          required: true
-        }
-      ]
-    },
-
-    {
-      name: "editjoindm",
-      description: "Edit the join DM message",
-      options: [
-        {
-          name: "message",
-          description:
-            "New message sent to users when they join",
-          type: 3,
-          required: true
-        }
-      ]
-    },
-
-    {
-      name: "stopjoindm",
-      description: "Disable join DMs"
-    }
-  ];
-
-  const rest = new REST({
-    version: "10"
-  }).setToken(
-    process.env.DISCORD_TOKEN
-  );
+  console.log(`Logged in as ${client.user.tag}`);
 
   try {
+    const rest = new REST({
+      version: "10"
+    }).setToken(process.env.DISCORD_TOKEN);
+
+    if (!process.env.CLIENT_ID) {
+      console.error("CLIENT_ID is missing from environment variables.");
+      return;
+    }
+
+    if (!process.env.GUILD_ID) {
+      console.error("GUILD_ID is missing from environment variables.");
+      return;
+    }
+
     await rest.put(
       Routes.applicationGuildCommands(
         process.env.CLIENT_ID,
         process.env.GUILD_ID
       ),
       {
-        body: commands
+        body: slashCommands
       }
     );
 
+    console.log("Slash commands registered.");
+  } catch (error) {
+    console.error("Error registering slash commands:", error);
+  }
+});
+
+// =====================================================
+// MEMBER JOIN
+// =====================================================
+
+client.on("guildMemberAdd", async member => {
+  try {
+    const settings = joinDM[member.guild.id];
+
+    if (!settings || !settings.enabled || !settings.message) {
+      return;
+    }
+
+    const message = replaceJoinVariables(
+      settings.message,
+      member
+    );
+
+    const embed = baseEmbed(COLORS.info)
+      .setTitle(`👋 Welcome to ${member.guild.name}!`)
+      .setDescription(message)
+      .setThumbnail(member.user.displayAvatarURL())
+      .addFields({
+        name: "Member",
+        value: `${member.user}`,
+        inline: true
+      });
+
+    await member.send({
+      embeds: [embed]
+    });
+
     console.log(
-      "Slash commands registered."
+      `Sent join DM to ${member.user.tag} in ${member.guild.name}`
     );
   } catch (error) {
-    console.error(
-      "Slash command registration failed:",
-      error
+    console.log(
+      `Could not DM ${member.user.tag}: ${error.message}`
     );
   }
 });
 
-// =========================
+// =====================================================
+// SLASH COMMAND HANDLER
+// =====================================================
+
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) {
+    return;
+  }
+
+  if (!interaction.guild) {
+    return interaction.reply({
+      embeds: [
+        errorEmbed(
+          "Server Only",
+          "This command can only be used inside a server."
+        )
+      ],
+      ephemeral: true
+    });
+  }
+
+  const command = interaction.commandName;
+  const member = interaction.member;
+
+  // ===================================================
+  // /commands
+  // ===================================================
+
+  if (command === "commands") {
+    if (!isModerator(member)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Access Denied",
+            "Only **Server Owners and Administrators** can use this command."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const embed = baseEmbed(COLORS.info)
+      .setTitle("📖 Mog Moderation Commands")
+      .setDescription(
+        "Here are all the commands currently available."
+      )
+      .addFields(
+        {
+          name: "🛡️ Moderation",
+          value:
+            "`/warn @user [reason]`\n" +
+            "`/kick @user [reason]`\n" +
+            "`/ban @user [reason]`\n" +
+            "`/mute @user <duration> [reason]`"
+        },
+        {
+          name: "👋 Join DM",
+          value:
+            "`/joindm <message>`\n" +
+            "`/editjoindm <message>`\n" +
+            "`/stopjoindm`"
+        },
+        {
+          name: "⌨️ Prefix Commands",
+          value:
+            "`?warn @user [reason]`\n" +
+            "`?kick @user [reason]`\n" +
+            "`?ban @user [reason]`\n" +
+            "`?mute @user <duration> [reason]`\n" +
+            "`?joindm <message>`\n" +
+            "`?editjoindm <message>`\n" +
+            "`?stopjoindm`"
+        },
+        {
+          name: "📌 Join DM Variables",
+          value:
+            "`{user}` • Mention the member\n" +
+            "`{username}` • Their username\n" +
+            "`{server}` • Server name\n" +
+            "`{membercount}` • Current member count"
+        }
+      )
+      .setFooter({
+        text: "Mog Moderation • Owner/Admin Command"
+      });
+
+    return interaction.reply({
+      embeds: [embed],
+      ephemeral: true
+    });
+  }
+
+  // ===================================================
+  // MODERATOR PERMISSION
+  // ===================================================
+
+  if (
+    [
+      "warn",
+      "kick",
+      "ban",
+      "mute",
+      "joindm",
+      "editjoindm",
+      "stopjoindm"
+    ].includes(command)
+  ) {
+    if (!isModerator(member)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Access Denied",
+            "You need **Administrator** permission or be the **Server Owner** to use this command."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+  }
+
+  // ===================================================
+  // /WARN
+  // ===================================================
+
+  if (command === "warn") {
+    const target = interaction.options.getMember("user");
+    const reason =
+      interaction.options.getString("reason") ||
+      "No reason provided";
+
+    if (!target) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "I couldn't find that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Warn User",
+            "You cannot warn yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const userWarnings = getUserWarnings(
+      interaction.guild.id,
+      target.id
+    );
+
+    const caseNumber = getCaseNumber();
+
+    userWarnings.push({
+      case: caseNumber,
+      reason,
+      moderator: interaction.user.id,
+      timestamp: new Date().toISOString()
+    });
+
+    saveWarnings();
+
+    const embed = moderationEmbed({
+      title: "⚠️ Member Warned",
+      description: `${target} has been warned.`,
+      target,
+      moderator: interaction.user,
+      reason,
+      caseNumber,
+      color: COLORS.warning
+    }).addFields({
+      name: "Total Warnings",
+      value: `**${userWarnings.length}**`,
+      inline: true
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    try {
+      await target.send({
+        embeds: [
+          baseEmbed(COLORS.warning)
+            .setTitle("⚠️ You have been warned")
+            .setDescription(
+              `You received a warning in **${interaction.guild.name}**.`
+            )
+            .addFields(
+              {
+                name: "Reason",
+                value: reason
+              },
+              {
+                name: "Case",
+                value: caseNumber,
+                inline: true
+              },
+              {
+                name: "Total Warnings",
+                value: String(userWarnings.length),
+                inline: true
+              }
+            )
+        ]
+      });
+    } catch {
+      // User has DMs disabled
+    }
+
+    return;
+  }
+
+  // ===================================================
+  // /KICK
+  // ===================================================
+
+  if (command === "kick") {
+    const target = interaction.options.getMember("user");
+    const reason =
+      interaction.options.getString("reason") ||
+      "No reason provided";
+
+    if (!target) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "I couldn't find that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Kick User",
+            "You cannot kick yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!botCanModerate(interaction.guild, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !interaction.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.KickMembers
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Kick Members** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    const embed = moderationEmbed({
+      title: "👢 Member Kicked",
+      description: `${target} has been kicked from the server.`,
+      target,
+      moderator: interaction.user,
+      reason,
+      caseNumber,
+      color: COLORS.danger
+    });
+
+    try {
+      await target.send({
+        embeds: [
+          baseEmbed(COLORS.danger)
+            .setTitle("👢 You have been kicked")
+            .setDescription(
+              `You were kicked from **${interaction.guild.name}**.`
+            )
+            .addFields(
+              {
+                name: "Reason",
+                value: reason
+              },
+              {
+                name: "Case",
+                value: caseNumber
+              }
+            )
+        ]
+      });
+    } catch {
+      // DMs disabled
+    }
+
+    await target.kick(reason);
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // /BAN
+  // ===================================================
+
+  if (command === "ban") {
+    const target = interaction.options.getMember("user");
+    const reason =
+      interaction.options.getString("reason") ||
+      "No reason provided";
+
+    if (!target) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "I couldn't find that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Ban User",
+            "You cannot ban yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!botCanModerate(interaction.guild, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !interaction.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.BanMembers
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Ban Members** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    const embed = moderationEmbed({
+      title: "🔨 Member Banned",
+      description: `${target} has been banned from the server.`,
+      target,
+      moderator: interaction.user,
+      reason,
+      caseNumber,
+      color: COLORS.danger
+    });
+
+    try {
+      await target.send({
+        embeds: [
+          baseEmbed(COLORS.danger)
+            .setTitle("🔨 You have been banned")
+            .setDescription(
+              `You were banned from **${interaction.guild.name}**.`
+            )
+            .addFields(
+              {
+                name: "Reason",
+                value: reason
+              },
+              {
+                name: "Case",
+                value: caseNumber
+              }
+            )
+        ]
+      });
+    } catch {
+      // DMs disabled
+    }
+
+    await target.ban({
+      reason
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // /MUTE
+  // ===================================================
+
+  if (command === "mute") {
+    const target = interaction.options.getMember("user");
+    const durationInput =
+      interaction.options.getString("duration");
+
+    const reason =
+      interaction.options.getString("reason") ||
+      "No reason provided";
+
+    const duration = parseDuration(durationInput);
+
+    if (!target) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "User Not Found",
+            "I couldn't find that member."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!duration) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Invalid Duration",
+            "Use a duration like `10m`, `1h`, `1d`, or `1w`."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (duration > 28 * 24 * 60 * 60 * 1000) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Duration Too Long",
+            "Discord allows a maximum timeout of **28 days**."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!canModerate(member, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Mute User",
+            "You cannot mute yourself, the server owner, or a member with an equal/higher role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (!botCanModerate(interaction.guild, target)) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (
+      !interaction.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Moderate Members** permission."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    await target.timeout(
+      duration,
+      reason
+    );
+
+    const embed = moderationEmbed({
+      title: "🔇 Member Muted",
+      description: `${target} has been timed out.`,
+      target,
+      moderator: interaction.user,
+      reason,
+      caseNumber,
+      color: COLORS.warning
+    }).addFields({
+      name: "Duration",
+      value: durationInput,
+      inline: true
+    });
+
+    await interaction.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(interaction.guild, embed);
+
+    try {
+      await target.send({
+        embeds: [
+          baseEmbed(COLORS.warning)
+            .setTitle("🔇 You have been muted")
+            .setDescription(
+              `You were timed out in **${interaction.guild.name}**.`
+            )
+            .addFields(
+              {
+                name: "Duration",
+                value: durationInput,
+                inline: true
+              },
+              {
+                name: "Reason",
+                value: reason,
+                inline: false
+              },
+              {
+                name: "Case",
+                value: caseNumber,
+                inline: true
+              }
+            )
+        ]
+      });
+    } catch {
+      // DMs disabled
+    }
+
+    return;
+  }
+
+  // ===================================================
+  // /JOINDM
+  // ===================================================
+
+  if (command === "joindm") {
+    const message =
+      interaction.options.getString("message");
+
+    joinDM[interaction.guild.id] = {
+      enabled: true,
+      message
+    };
+
+    saveJoinDM();
+
+    const embed = baseEmbed(COLORS.success)
+      .setTitle("👋 Join DM Enabled")
+      .setDescription(
+        "Automatic welcome DMs are now enabled."
+      )
+      .addFields({
+        name: "Message",
+        value: message
+      });
+
+    return interaction.reply({
+      embeds: [embed]
+    });
+  }
+
+  // ===================================================
+  // /EDITJOINDM
+  // ===================================================
+
+  if (command === "editjoindm") {
+    const message =
+      interaction.options.getString("message");
+
+    if (
+      !joinDM[interaction.guild.id] ||
+      !joinDM[interaction.guild.id].enabled
+    ) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Join DM Not Enabled",
+            "Use `/joindm` first."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    joinDM[interaction.guild.id].message = message;
+
+    saveJoinDM();
+
+    const embed = baseEmbed(COLORS.success)
+      .setTitle("✏️ Join DM Updated")
+      .setDescription(
+        "The automatic welcome DM has been updated."
+      )
+      .addFields({
+        name: "New Message",
+        value: message
+      });
+
+    return interaction.reply({
+      embeds: [embed]
+    });
+  }
+
+  // ===================================================
+  // /STOPJOINDM
+  // ===================================================
+
+  if (command === "stopjoindm") {
+    if (!joinDM[interaction.guild.id]) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Join DM Not Enabled",
+            "There is no active join DM system."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    joinDM[interaction.guild.id].enabled = false;
+
+    saveJoinDM();
+
+    return interaction.reply({
+      embeds: [
+        successEmbed(
+          "👋 Join DM Disabled",
+          "Automatic welcome DMs have been disabled."
+        )
+      ]
+    });
+  }
+});
+
+// =====================================================
 // PREFIX COMMANDS
-// =========================
+// =====================================================
 
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
   if (!message.guild) return;
-  if (!message.content.startsWith(PREFIX)) return;
 
-  const args = message.content
-    .slice(PREFIX.length)
-    .trim()
-    .split(/\s+/);
+  if (!message.content.startsWith(PREFIX)) {
+    return;
+  }
 
-  const command =
-    args.shift()?.toLowerCase();
+  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+
+  const command = args.shift()?.toLowerCase();
 
   if (!command) return;
 
-  // =====================
-  // ADMIN COMMANDS
-  // =====================
+  // ===================================================
+  // PREFIX PERMISSION
+  // ===================================================
 
-  const adminCommands = [
-    "ban",
-    "kick",
-    "mute",
+  const moderationCommands = [
     "warn",
+    "kick",
+    "ban",
+    "mute",
     "joindm",
     "editjoindm",
     "stopjoindm"
   ];
 
-  if (
-    adminCommands.includes(command) &&
-    !isAdmin(message.member)
-  ) {
-    return message.reply({
-      embeds: [
-        errorEmbed(
-          "Access Denied",
-          "You need **Administrator** permission to use this command."
-        )
-      ]
-    });
-  }
-
-  // =====================
-  // TEST
-  // =====================
-
-  if (command === "test") {
-    return message.reply({
-      embeds: [
-        successEmbed(
-          "Bot Online",
-          "Mog Moderation is working correctly."
-        )
-      ]
-    });
-  }
-
-  // =====================
-  // JOIN DM
-  // =====================
-
-  if (command === "joindm") {
-    const joinMessage =
-      args.join(" ").trim();
-
-    if (!joinMessage) {
+  if (moderationCommands.includes(command)) {
+    if (!isModerator(message.member)) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Missing Message",
-            `Usage: \`${PREFIX}joindm <message>\``
+            "Access Denied",
+            "You need **Administrator** permission or be the **Server Owner** to use this command."
+          )
+        ]
+      });
+    }
+  }
+
+  // ===================================================
+  // ?COMMANDS
+  // ===================================================
+
+  if (command === "commands") {
+    if (!isModerator(message.member)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Access Denied",
+            "Only **Server Owners and Administrators** can use this command."
           )
         ]
       });
     }
 
-    const settings =
-      getJoinDMSettings(
-        message.guild.id
-      );
-
-    settings.enabled = true;
-    settings.message = joinMessage;
-
-    saveJoinDMs();
-
-    return message.reply({
-      embeds: [
-        successEmbed(
-          "Join DMs Enabled",
-          "Join DMs are now enabled.",
-          [
-            {
-              name: "Message",
-              value:
-                joinMessage.length > 1024
-                  ? joinMessage.slice(0, 1021) + "..."
-                  : joinMessage
-            },
-            {
-              name: "Available Variables",
-              value:
-                "`{user}` ` {username}` `{server}` `{membercount}`"
-                  .replace("` {", "`{")
-            }
-          ]
-        )
-      ]
-    });
-  }
-
-  // =====================
-  // EDIT JOIN DM
-  // =====================
-
-  if (command === "editjoindm") {
-    const joinMessage =
-      args.join(" ").trim();
-
-    if (!joinMessage) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Missing Message",
-            `Usage: \`${PREFIX}editjoindm <message>\``
-          )
-        ]
+    const embed = baseEmbed(COLORS.info)
+      .setTitle("📖 Mog Moderation Commands")
+      .setDescription(
+        "Here are all the commands currently available."
+      )
+      .addFields(
+        {
+          name: "🛡️ Moderation",
+          value:
+            "`/warn @user [reason]`\n" +
+            "`/kick @user [reason]`\n" +
+            "`/ban @user [reason]`\n" +
+            "`/mute @user <duration> [reason]`"
+        },
+        {
+          name: "👋 Join DM",
+          value:
+            "`/joindm <message>`\n" +
+            "`/editjoindm <message>`\n" +
+            "`/stopjoindm`"
+        },
+        {
+          name: "⌨️ Prefix Commands",
+          value:
+            "`?warn @user [reason]`\n" +
+            "`?kick @user [reason]`\n" +
+            "`?ban @user [reason]`\n" +
+            "`?mute @user <duration> [reason]`\n" +
+            "`?joindm <message>`\n" +
+            "`?editjoindm <message>`\n" +
+            "`?stopjoindm`"
+        },
+        {
+          name: "📌 Join DM Variables",
+          value:
+            "`{user}` • Mention the member\n" +
+            "`{username}` • Their username\n" +
+            "`{server}` • Server name\n" +
+            "`{membercount}` • Current member count"
+        }
+      )
+      .setFooter({
+        text: "Mog Moderation • Owner/Admin Command"
       });
-    }
-
-    const settings =
-      getJoinDMSettings(
-        message.guild.id
-      );
-
-    settings.enabled = true;
-    settings.message = joinMessage;
-
-    saveJoinDMs();
 
     return message.reply({
-      embeds: [
-        successEmbed(
-          "Join DM Updated",
-          "The join DM message has been updated.",
-          [
-            {
-              name: "New Message",
-              value:
-                joinMessage.length > 1024
-                  ? joinMessage.slice(0, 1021) + "..."
-                  : joinMessage
-            }
-          ]
-        )
-      ]
+      embeds: [embed]
     });
   }
 
-  // =====================
-  // STOP JOIN DM
-  // =====================
-
-  if (command === "stopjoindm") {
-    const settings =
-      getJoinDMSettings(
-        message.guild.id
-      );
-
-    settings.enabled = false;
-
-    saveJoinDMs();
-
-    return message.reply({
-      embeds: [
-        successEmbed(
-          "Join DMs Disabled",
-          "Automatic join DMs have been disabled."
-        )
-      ]
-    });
-  }
-
-  // =====================
-  // WARN
-  // =====================
+  // ===================================================
+  // ?WARN
+  // ===================================================
 
   if (command === "warn") {
     const target =
       message.mentions.members.first();
 
+    const reason =
+      args.slice(1).join(" ") ||
+      "No reason provided";
+
     if (!target) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Missing User",
-            `Usage: \`${PREFIX}warn @user [reason]\``
+            "User Not Found",
+            "Mention a member to warn.\n\nExample: `?warn @user spam`"
           )
         ]
       });
     }
 
-    if (
-      !canModerate(
-        message.member,
-        target
-      )
-    ) {
+    if (!canModerate(message.member, target)) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Cannot Warn Member",
+            "Cannot Warn User",
             "You cannot warn yourself, the server owner, or a member with an equal/higher role."
           )
         ]
       });
     }
 
-    const reason =
-      args.slice(1).join(" ") ||
-      "No reason provided";
+    const userWarnings = getUserWarnings(
+      message.guild.id,
+      target.id
+    );
 
-    const caseNumber =
-      getCaseNumber();
-
-    const userWarnings =
-      getUserWarnings(
-        message.guild.id,
-        target.id
-      );
+    const caseNumber = getCaseNumber();
 
     userWarnings.push({
       case: caseNumber,
       reason,
       moderator: message.author.id,
-      timestamp:
-        new Date().toISOString()
+      timestamp: new Date().toISOString()
     });
 
     saveWarnings();
 
-    const warningCount =
-      userWarnings.length;
-
-    const embed =
-      moderationEmbed({
-        title: "Member Warned",
-        description:
-          `**${target.user.tag}** has been warned.`,
-        target: target.user,
-        moderator: message.author,
-        reason,
-        caseNumber,
-        color: COLORS.warning
-      });
-
-    embed.addFields({
+    const embed = moderationEmbed({
+      title: "⚠️ Member Warned",
+      description: `${target} has been warned.`,
+      target,
+      moderator: message.author,
+      reason,
+      caseNumber,
+      color: COLORS.warning
+    }).addFields({
       name: "Total Warnings",
-      value: `\`${warningCount}\``,
+      value: `**${userWarnings.length}**`,
       inline: true
     });
 
@@ -884,1049 +1386,450 @@ client.on("messageCreate", async message => {
       embeds: [embed]
     });
 
-    const logEmbed =
-      moderationEmbed({
-        title: "Warning Issued",
-        description:
-          `A warning was issued to **${target.user.tag}**.`,
-        target: target.user,
-        moderator: message.author,
-        reason,
-        caseNumber,
-        color: COLORS.warning
-      });
+    await sendLog(message.guild, embed);
 
-    logEmbed.addFields({
-      name: "Total Warnings",
-      value: `\`${warningCount}\``,
-      inline: true
-    });
-
-    return sendLog(
-      message.guild,
-      logEmbed
-    );
+    return;
   }
 
-  // =====================
-  // KICK
-  // =====================
+  // ===================================================
+  // ?KICK
+  // ===================================================
 
   if (command === "kick") {
     const target =
       message.mentions.members.first();
 
+    const reason =
+      args.slice(1).join(" ") ||
+      "No reason provided";
+
     if (!target) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Missing User",
-            `Usage: \`${PREFIX}kick @user [reason]\``
+            "User Not Found",
+            "Mention a member to kick."
           )
         ]
       });
     }
 
-    if (
-      !canModerate(
-        message.member,
-        target
-      )
-    ) {
+    if (!canModerate(message.member, target)) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Cannot Kick Member",
+            "Cannot Kick User",
             "You cannot kick yourself, the server owner, or a member with an equal/higher role."
           )
         ]
       });
     }
 
+    if (!botCanModerate(message.guild, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ]
+      });
+    }
+
     if (
-      !botCanModerate(
-        message.guild,
-        target
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.KickMembers
       )
     ) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Role Hierarchy",
-            "My bot role must be higher than the member's highest role."
+            "Missing Permission",
+            "I need the **Kick Members** permission."
           )
         ]
       });
     }
 
-    if (!target.kickable) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Kick Failed",
-            "I don't have permission to kick this member."
-          )
-        ]
-      });
-    }
+    const caseNumber = getCaseNumber();
 
-    const reason =
-      args.slice(1).join(" ") ||
-      "No reason provided";
+    const embed = moderationEmbed({
+      title: "👢 Member Kicked",
+      description: `${target} has been kicked from the server.`,
+      target,
+      moderator: message.author,
+      reason,
+      caseNumber,
+      color: COLORS.danger
+    });
 
-    const caseNumber =
-      getCaseNumber();
+    await target.kick(reason);
 
-    try {
-      await target.kick(reason);
+    await message.reply({
+      embeds: [embed]
+    });
 
-      const embed =
-        moderationEmbed({
-          title: "Member Kicked",
-          description:
-            `**${target.user.tag}** has been kicked from the server.`,
-          target: target.user,
-          moderator: message.author,
-          reason,
-          caseNumber,
-          color: COLORS.danger
-        });
+    await sendLog(message.guild, embed);
 
-      await message.reply({
-        embeds: [embed]
-      });
-
-      return sendLog(
-        message.guild,
-        embed
-      );
-    } catch (error) {
-      console.error(error);
-
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Kick Failed",
-            "Something went wrong while kicking that member."
-          )
-        ]
-      });
-    }
+    return;
   }
 
-  // =====================
-  // BAN
-  // =====================
+  // ===================================================
+  // ?BAN
+  // ===================================================
 
   if (command === "ban") {
     const target =
       message.mentions.members.first();
 
+    const reason =
+      args.slice(1).join(" ") ||
+      "No reason provided";
+
     if (!target) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Missing User",
-            `Usage: \`${PREFIX}ban @user [reason]\``
+            "User Not Found",
+            "Mention a member to ban."
           )
         ]
       });
     }
 
-    if (
-      !canModerate(
-        message.member,
-        target
-      )
-    ) {
+    if (!canModerate(message.member, target)) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Cannot Ban Member",
+            "Cannot Ban User",
             "You cannot ban yourself, the server owner, or a member with an equal/higher role."
           )
         ]
       });
     }
 
+    if (!botCanModerate(message.guild, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ]
+      });
+    }
+
     if (
-      !botCanModerate(
-        message.guild,
-        target
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.BanMembers
       )
     ) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Role Hierarchy",
-            "My bot role must be higher than the member's highest role."
+            "Missing Permission",
+            "I need the **Ban Members** permission."
           )
         ]
       });
     }
 
-    if (!target.bannable) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Ban Failed",
-            "I don't have permission to ban this member."
-          )
-        ]
-      });
-    }
+    const caseNumber = getCaseNumber();
 
-    const reason =
-      args.slice(1).join(" ") ||
-      "No reason provided";
+    const embed = moderationEmbed({
+      title: "🔨 Member Banned",
+      description: `${target} has been banned from the server.`,
+      target,
+      moderator: message.author,
+      reason,
+      caseNumber,
+      color: COLORS.danger
+    });
 
-    const caseNumber =
-      getCaseNumber();
+    await target.ban({
+      reason
+    });
 
-    try {
-      await target.ban({
-        reason
-      });
+    await message.reply({
+      embeds: [embed]
+    });
 
-      const embed =
-        moderationEmbed({
-          title: "Member Banned",
-          description:
-            `**${target.user.tag}** has been permanently banned.`,
-          target: target.user,
-          moderator: message.author,
-          reason,
-          caseNumber,
-          color: COLORS.danger
-        });
+    await sendLog(message.guild, embed);
 
-      await message.reply({
-        embeds: [embed]
-      });
-
-      return sendLog(
-        message.guild,
-        embed
-      );
-    } catch (error) {
-      console.error(error);
-
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Ban Failed",
-            "Something went wrong while banning that member."
-          )
-        ]
-      });
-    }
+    return;
   }
 
-  // =====================
-  // MUTE
-  // =====================
+  // ===================================================
+  // ?MUTE
+  // ===================================================
 
   if (command === "mute") {
     const target =
       message.mentions.members.first();
 
+    const durationInput = args[1];
+
+    const reason =
+      args.slice(2).join(" ") ||
+      "No reason provided";
+
     if (!target) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Missing User",
-            `Usage: \`${PREFIX}mute @user <duration> [reason]\``
+            "User Not Found",
+            "Mention a member to mute."
           )
         ]
       });
     }
 
-    if (
-      !canModerate(
-        message.member,
-        target
-      )
-    ) {
+    if (!durationInput) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Cannot Mute Member",
-            "You cannot mute yourself, the server owner, or a member with an equal/higher role."
+            "Missing Duration",
+            "Example: `?mute @user 10m spam`"
           )
         ]
       });
     }
 
-    if (
-      !botCanModerate(
-        message.guild,
-        target
-      )
-    ) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Role Hierarchy",
-            "My bot role must be higher than the member's highest role."
-          )
-        ]
-      });
-    }
-
-    const durationInput =
-      args[1];
-
-    const duration =
-      parseDuration(
-        durationInput
-      );
+    const duration = parseDuration(durationInput);
 
     if (!duration) {
       return message.reply({
         embeds: [
           errorEmbed(
             "Invalid Duration",
-            "Use `17s`, `10m`, `2h`, or `7d`.\n\nMaximum: **28 days**."
+            "Use `10s`, `10m`, `1h`, `1d`, or `1w`."
           )
         ]
       });
     }
 
-    const reason =
-      args.slice(2).join(" ") ||
-      "No reason provided";
-
-    const caseNumber =
-      getCaseNumber();
-
-    try {
-      await target.timeout(
-        duration,
-        reason
-      );
-
-      const embed =
-        moderationEmbed({
-          title: "Member Muted",
-          description:
-            `**${target.user.tag}** has been timed out.`,
-          target: target.user,
-          moderator: message.author,
-          reason,
-          caseNumber,
-          color: COLORS.warning
-        });
-
-      embed.addFields({
-        name: "Duration",
-        value: `\`${durationInput}\``,
-        inline: true
-      });
-
-      await message.reply({
-        embeds: [embed]
-      });
-
-      return sendLog(
-        message.guild,
-        embed
-      );
-    } catch (error) {
-      console.error(error);
-
+    if (duration > 28 * 24 * 60 * 60 * 1000) {
       return message.reply({
         embeds: [
           errorEmbed(
-            "Mute Failed",
-            "Something went wrong while timing out that member."
+            "Duration Too Long",
+            "Discord allows a maximum timeout of **28 days**."
           )
         ]
       });
     }
+
+    if (!canModerate(message.member, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Cannot Mute User",
+            "You cannot mute yourself, the server owner, or a member with an equal/higher role."
+          )
+        ]
+      });
+    }
+
+    if (!botCanModerate(message.guild, target)) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Role Hierarchy",
+            "My role must be higher than the target user's highest role."
+          )
+        ]
+      });
+    }
+
+    if (
+      !message.guild.members.me.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Permission",
+            "I need the **Moderate Members** permission."
+          )
+        ]
+      });
+    }
+
+    const caseNumber = getCaseNumber();
+
+    await target.timeout(
+      duration,
+      reason
+    );
+
+    const embed = moderationEmbed({
+      title: "🔇 Member Muted",
+      description: `${target} has been timed out.`,
+      target,
+      moderator: message.author,
+      reason,
+      caseNumber,
+      color: COLORS.warning
+    }).addFields({
+      name: "Duration",
+      value: durationInput,
+      inline: true
+    });
+
+    await message.reply({
+      embeds: [embed]
+    });
+
+    await sendLog(message.guild, embed);
+
+    return;
+  }
+
+  // ===================================================
+  // ?JOINDM
+  // ===================================================
+
+  if (command === "joindm") {
+    const messageText = args.join(" ");
+
+    if (!messageText) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Message",
+            "Example:\n`?joindm Welcome {user} to {server}!`"
+          )
+        ]
+      });
+    }
+
+    joinDM[message.guild.id] = {
+      enabled: true,
+      message: messageText
+    };
+
+    saveJoinDM();
+
+    return message.reply({
+      embeds: [
+        successEmbed(
+          "👋 Join DM Enabled",
+          "Automatic welcome DMs are now enabled."
+        ).addFields({
+          name: "Message",
+          value: messageText
+        })
+      ]
+    });
+  }
+
+  // ===================================================
+  // ?EDITJOINDM
+  // ===================================================
+
+  if (command === "editjoindm") {
+    const messageText = args.join(" ");
+
+    if (!messageText) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Missing Message",
+            "Example:\n`?editjoindm Welcome {user}!`"
+          )
+        ]
+      });
+    }
+
+    if (
+      !joinDM[message.guild.id] ||
+      !joinDM[message.guild.id].enabled
+    ) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Join DM Not Enabled",
+            "Use `?joindm` first."
+          )
+        ]
+      });
+    }
+
+    joinDM[message.guild.id].message =
+      messageText;
+
+    saveJoinDM();
+
+    return message.reply({
+      embeds: [
+        successEmbed(
+          "✏️ Join DM Updated",
+          "The automatic welcome DM has been updated."
+        ).addFields({
+          name: "New Message",
+          value: messageText
+        })
+      ]
+    });
+  }
+
+  // ===================================================
+  // ?STOPJOINDM
+  // ===================================================
+
+  if (command === "stopjoindm") {
+    if (!joinDM[message.guild.id]) {
+      return message.reply({
+        embeds: [
+          errorEmbed(
+            "Join DM Not Enabled",
+            "There is no active join DM system."
+          )
+        ]
+      });
+    }
+
+    joinDM[message.guild.id].enabled = false;
+
+    saveJoinDM();
+
+    return message.reply({
+      embeds: [
+        successEmbed(
+          "👋 Join DM Disabled",
+          "Automatic welcome DMs have been disabled."
+        )
+      ]
+    });
   }
 });
 
-// =========================
-// SLASH COMMANDS
-// =========================
-
-client.on(
-  "interactionCreate",
-  async interaction => {
-    if (!interaction.isChatInputCommand()) {
-      return;
-    }
-
-    if (!interaction.guild) {
-      return;
-    }
-
-    const command =
-      interaction.commandName;
-
-    // =====================
-    // ADMIN CHECK
-    // =====================
-
-    const adminCommands = [
-      "ban",
-      "kick",
-      "mute",
-      "warn",
-      "joindm",
-      "editjoindm",
-      "stopjoindm"
-    ];
-
-    if (
-      adminCommands.includes(command) &&
-      !isAdmin(interaction.member)
-    ) {
-      return interaction.reply({
-        embeds: [
-          errorEmbed(
-            "Access Denied",
-            "You need **Administrator** permission to use this command."
-          )
-        ],
-        ephemeral: true
-      });
-    }
-
-    // =====================
-    // JOIN DM
-    // =====================
-
-    if (command === "joindm") {
-      const joinMessage =
-        interaction.options
-          .getString("message")
-          .trim();
-
-      const settings =
-        getJoinDMSettings(
-          interaction.guild.id
-        );
-
-      settings.enabled = true;
-      settings.message = joinMessage;
-
-      saveJoinDMs();
-
-      return interaction.reply({
-        embeds: [
-          successEmbed(
-            "Join DMs Enabled",
-            "Join DMs are now enabled.",
-            [
-              {
-                name: "Message",
-                value:
-                  joinMessage.length > 1024
-                    ? joinMessage.slice(0, 1021) + "..."
-                    : joinMessage
-              },
-              {
-                name: "Variables",
-                value:
-                  "`{user}` • `{username}` • `{server}` • `{membercount}`"
-              }
-            ]
-          )
-        ]
-      });
-    }
-
-    // =====================
-    // EDIT JOIN DM
-    // =====================
-
-    if (command === "editjoindm") {
-      const joinMessage =
-        interaction.options
-          .getString("message")
-          .trim();
-
-      const settings =
-        getJoinDMSettings(
-          interaction.guild.id
-        );
-
-      settings.enabled = true;
-      settings.message = joinMessage;
-
-      saveJoinDMs();
-
-      return interaction.reply({
-        embeds: [
-          successEmbed(
-            "Join DM Updated",
-            "The join DM message has been updated.",
-            [
-              {
-                name: "New Message",
-                value:
-                  joinMessage.length > 1024
-                    ? joinMessage.slice(0, 1021) + "..."
-                    : joinMessage
-              }
-            ]
-          )
-        ]
-      });
-    }
-
-    // =====================
-    // STOP JOIN DM
-    // =====================
-
-    if (command === "stopjoindm") {
-      const settings =
-        getJoinDMSettings(
-          interaction.guild.id
-        );
-
-      settings.enabled = false;
-
-      saveJoinDMs();
-
-      return interaction.reply({
-        embeds: [
-          successEmbed(
-            "Join DMs Disabled",
-            "Automatic join DMs have been disabled."
-          )
-        ]
-      });
-    }
-
-    // =====================
-    // WARN
-    // =====================
-
-    if (command === "warn") {
-      const targetUser =
-        interaction.options.getUser(
-          "user"
-        );
-
-      const target =
-        await interaction.guild.members
-          .fetch(targetUser.id)
-          .catch(() => null);
-
-      if (!target) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Member Not Found",
-              "That user is not currently in this server."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !canModerate(
-          interaction.member,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Cannot Warn Member",
-              "You cannot warn yourself, the server owner, or a member with an equal/higher role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      const reason =
-        interaction.options.getString(
-          "reason"
-        ) ||
-        "No reason provided";
-
-      const caseNumber =
-        getCaseNumber();
-
-      const userWarnings =
-        getUserWarnings(
-          interaction.guild.id,
-          target.id
-        );
-
-      userWarnings.push({
-        case: caseNumber,
-        reason,
-        moderator:
-          interaction.user.id,
-        timestamp:
-          new Date().toISOString()
-      });
-
-      saveWarnings();
-
-      const warningCount =
-        userWarnings.length;
-
-      const embed =
-        moderationEmbed({
-          title: "Member Warned",
-          description:
-            `**${target.user.tag}** has been warned.`,
-          target: target.user,
-          moderator: interaction.user,
-          reason,
-          caseNumber,
-          color: COLORS.warning
-        });
-
-      embed.addFields({
-        name: "Total Warnings",
-        value: `\`${warningCount}\``,
-        inline: true
-      });
-
-      await interaction.reply({
-        embeds: [embed]
-      });
-
-      const logEmbed =
-        moderationEmbed({
-          title: "Warning Issued",
-          description:
-            `A warning was issued to **${target.user.tag}**.`,
-          target: target.user,
-          moderator: interaction.user,
-          reason,
-          caseNumber,
-          color: COLORS.warning
-        });
-
-      logEmbed.addFields({
-        name: "Total Warnings",
-        value: `\`${warningCount}\``,
-        inline: true
-      });
-
-      return sendLog(
-        interaction.guild,
-        logEmbed
-      );
-    }
-
-    // =====================
-    // KICK
-    // =====================
-
-    if (command === "kick") {
-      const targetUser =
-        interaction.options.getUser(
-          "user"
-        );
-
-      const target =
-        await interaction.guild.members
-          .fetch(targetUser.id)
-          .catch(() => null);
-
-      if (!target) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Member Not Found",
-              "That user is not currently in this server."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !canModerate(
-          interaction.member,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Cannot Kick Member",
-              "You cannot kick yourself, the server owner, or a member with an equal/higher role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !botCanModerate(
-          interaction.guild,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Role Hierarchy",
-              "My bot role must be higher than the member's highest role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (!target.kickable) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Kick Failed",
-              "I don't have permission to kick this member."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      const reason =
-        interaction.options.getString(
-          "reason"
-        ) ||
-        "No reason provided";
-
-      const caseNumber =
-        getCaseNumber();
-
-      try {
-        await target.kick(reason);
-
-        const embed =
-          moderationEmbed({
-            title: "Member Kicked",
-            description:
-              `**${target.user.tag}** has been kicked from the server.`,
-            target: target.user,
-            moderator:
-              interaction.user,
-            reason,
-            caseNumber,
-            color: COLORS.danger
-          });
-
-        await interaction.reply({
-          embeds: [embed]
-        });
-
-        return sendLog(
-          interaction.guild,
-          embed
-        );
-      } catch (error) {
-        console.error(error);
-
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Kick Failed",
-              "Something went wrong while kicking that member."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-    }
-
-    // =====================
-    // BAN
-    // =====================
-
-    if (command === "ban") {
-      const targetUser =
-        interaction.options.getUser(
-          "user"
-        );
-
-      const target =
-        await interaction.guild.members
-          .fetch(targetUser.id)
-          .catch(() => null);
-
-      if (!target) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Member Not Found",
-              "That user is not currently in this server."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !canModerate(
-          interaction.member,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Cannot Ban Member",
-              "You cannot ban yourself, the server owner, or a member with an equal/higher role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !botCanModerate(
-          interaction.guild,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Role Hierarchy",
-              "My bot role must be higher than the member's highest role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (!target.bannable) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Ban Failed",
-              "I don't have permission to ban this member."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      const reason =
-        interaction.options.getString(
-          "reason"
-        ) ||
-        "No reason provided";
-
-      const caseNumber =
-        getCaseNumber();
-
-      try {
-        await target.ban({
-          reason
-        });
-
-        const embed =
-          moderationEmbed({
-            title: "Member Banned",
-            description:
-              `**${target.user.tag}** has been permanently banned.`,
-            target: target.user,
-            moderator:
-              interaction.user,
-            reason,
-            caseNumber,
-            color: COLORS.danger
-          });
-
-        await interaction.reply({
-          embeds: [embed]
-        });
-
-        return sendLog(
-          interaction.guild,
-          embed
-        );
-      } catch (error) {
-        console.error(error);
-
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Ban Failed",
-              "Something went wrong while banning that member."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-    }
-
-    // =====================
-    // MUTE
-    // =====================
-
-    if (command === "mute") {
-      const targetUser =
-        interaction.options.getUser(
-          "user"
-        );
-
-      const target =
-        await interaction.guild.members
-          .fetch(targetUser.id)
-          .catch(() => null);
-
-      if (!target) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Member Not Found",
-              "That user is not currently in this server."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !canModerate(
-          interaction.member,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Cannot Mute Member",
-              "You cannot mute yourself, the server owner, or a member with an equal/higher role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      if (
-        !botCanModerate(
-          interaction.guild,
-          target
-        )
-      ) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Role Hierarchy",
-              "My bot role must be higher than the member's highest role."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      const durationInput =
-        interaction.options.getString(
-          "duration"
-        );
-
-      const duration =
-        parseDuration(
-          durationInput
-        );
-
-      if (!duration) {
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Invalid Duration",
-              "Use `17s`, `10m`, `2h`, or `7d`.\n\nMaximum: **28 days**."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-
-      const reason =
-        interaction.options.getString(
-          "reason"
-        ) ||
-        "No reason provided";
-
-      const caseNumber =
-        getCaseNumber();
-
-      try {
-        await target.timeout(
-          duration,
-          reason
-        );
-
-        const embed =
-          moderationEmbed({
-            title: "Member Muted",
-            description:
-              `**${target.user.tag}** has been timed out.`,
-            target: target.user,
-            moderator:
-              interaction.user,
-            reason,
-            caseNumber,
-            color: COLORS.warning
-          });
-
-        embed.addFields({
-          name: "Duration",
-          value: `\`${durationInput}\``,
-          inline: true
-        });
-
-        await interaction.reply({
-          embeds: [embed]
-        });
-
-        return sendLog(
-          interaction.guild,
-          embed
-        );
-      } catch (error) {
-        console.error(error);
-
-        return interaction.reply({
-          embeds: [
-            errorEmbed(
-              "Mute Failed",
-              "Something went wrong while timing out that member."
-            )
-          ],
-          ephemeral: true
-        });
-      }
-    }
-  }
-);
-
-// =========================
+// =====================================================
 // EXPRESS SERVER
-// =========================
+// =====================================================
 
 const app = express();
 
 app.get("/", (req, res) => {
-  res.send(
-    "Mog Moderation is online."
-  );
+  res.send("Mog Moderation is online.");
 });
 
-app.listen(3000, () => {
-  console.log(
-    "Web server running on port 3000."
-  );
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Web server running on port ${PORT}`);
 });
 
-// =========================
+// =====================================================
 // LOGIN
-// =========================
+// =====================================================
 
-client.login(
-  process.env.DISCORD_TOKEN
-);
+if (!process.env.DISCORD_TOKEN) {
+  console.error(
+    "DISCORD_TOKEN is missing from environment variables."
+  );
+  process.exit(1);
+}
+
+client.login(process.env.DISCORD_TOKEN);

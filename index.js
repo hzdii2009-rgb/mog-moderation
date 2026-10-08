@@ -10,7 +10,8 @@ const {
   PermissionsBitField,
   EmbedBuilder,
   REST,
-  Routes
+  Routes,
+  AuditLogEvent
 } = require("discord.js");
 
 // =====================================================
@@ -28,7 +29,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildModeration
   ]
 });
 
@@ -301,6 +303,134 @@ async function sendLog(guild, embed) {
   } catch (error) {
     console.error("Could not send moderation log:", error);
   }
+}
+
+// =====================================================
+// AUDIT LOG TRACKING
+// =====================================================
+
+// Stores actions performed by Mog Moderation so the automatic
+// Discord event logger does not create duplicate logs.
+
+const pendingActions = new Map();
+
+function pendingActionKey(guildId, action, targetId) {
+  return `${guildId}:${action}:${targetId}`;
+}
+
+function registerPendingAction(
+  guildId,
+  action,
+  targetId,
+  data
+) {
+  const key = pendingActionKey(
+    guildId,
+    action,
+    targetId
+  );
+
+  pendingActions.set(key, {
+    ...data,
+    expires: Date.now() + 10000
+  });
+
+  setTimeout(() => {
+    const current = pendingActions.get(key);
+
+    if (
+      current &&
+      current.expires <= Date.now()
+    ) {
+      pendingActions.delete(key);
+    }
+  }, 11000);
+}
+
+function consumePendingAction(
+  guildId,
+  action,
+  targetId
+) {
+  const key = pendingActionKey(
+    guildId,
+    action,
+    targetId
+  );
+
+  const actionData =
+    pendingActions.get(key);
+
+  if (!actionData) {
+    return null;
+  }
+
+  pendingActions.delete(key);
+
+  return actionData;
+}
+
+async function getRecentAuditEntry(
+  guild,
+  type,
+  targetId
+) {
+  try {
+    const me = guild.members.me;
+
+    if (
+      !me ||
+      !me.permissions.has(
+        PermissionsBitField.Flags.ViewAuditLog
+      )
+    ) {
+      return null;
+    }
+
+    const logs =
+      await guild.fetchAuditLogs({
+        type,
+        limit: 10
+      });
+
+    const entry = logs.entries.find(entry => {
+      if (
+        targetId &&
+        entry.target &&
+        entry.target.id !== targetId
+      ) {
+        return false;
+      }
+
+      return (
+        Date.now() -
+          entry.createdTimestamp <
+        10000
+      );
+    });
+
+    return entry || null;
+  } catch (error) {
+    console.error(
+      "Could not read audit logs:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+function auditModerator(entry) {
+  return entry?.executor
+    ? `${entry.executor}`
+    : "Unknown";
+}
+
+function auditReason(entry) {
+  return (
+    entry?.reason ||
+    "No reason provided"
+  );
 }
 
 // =====================================================
@@ -604,6 +734,55 @@ client.once("ready", async () => {
 
 client.on("guildMemberAdd", async member => {
   try {
+    // Detect a recently kicked member rejoining.
+    const recentKick =
+      member.guild._recentKickedMembers?.get(
+        member.id
+      );
+
+    if (recentKick) {
+      const caseNumber =
+        recentKick.caseNumber ||
+        getCaseNumber();
+
+      const embed = baseEmbed(COLORS.info)
+        .setTitle("🔄 Kicked Member Rejoined")
+        .setDescription(
+          `${member} has rejoined the server after previously being kicked.`
+        )
+        .setThumbnail(
+          member.user.displayAvatarURL()
+        )
+        .addFields(
+          {
+            name: "User",
+            value: `${member} \`${member.user.tag}\``,
+            inline: true
+          },
+          {
+            name: "Original Moderator",
+            value:
+              recentKick.moderator ||
+              "Unknown",
+            inline: true
+          },
+          {
+            name: "Original Case",
+            value: caseNumber,
+            inline: true
+          }
+        );
+
+      await sendLog(
+        member.guild,
+        embed
+      );
+
+      member.guild._recentKickedMembers.delete(
+        member.id
+      );
+    }
+
     const settings = joinDM[member.guild.id];
 
     if (!settings || !settings.enabled || !settings.message) {
@@ -638,6 +817,897 @@ client.on("guildMemberAdd", async member => {
     );
   }
 });
+
+// =====================================================
+// BAN LOG
+// =====================================================
+
+client.on("guildBanAdd", async ban => {
+  try {
+    const guild = ban.guild;
+    const user = ban.user;
+
+    const pending =
+      consumePendingAction(
+        guild.id,
+        "ban",
+        user.id
+      );
+
+    const audit =
+      await getRecentAuditEntry(
+        guild,
+        AuditLogEvent.MemberBanAdd,
+        user.id
+      );
+
+    const caseNumber =
+      pending?.caseNumber ||
+      getCaseNumber();
+
+    const moderator =
+      pending?.moderator ||
+      auditModerator(audit);
+
+    const reason =
+      pending?.reason ||
+      auditReason(audit);
+
+    const embed = baseEmbed(COLORS.danger)
+      .setTitle("🔨 Member Banned")
+      .setDescription(
+        `${user} has been banned from the server.`
+      )
+      .setThumbnail(
+        user.displayAvatarURL()
+      )
+      .addFields(
+        {
+          name: "User",
+          value: `${user} \`${user.tag}\``,
+          inline: true
+        },
+        {
+          name: "Moderator",
+          value: moderator,
+          inline: true
+        },
+        {
+          name: "Case",
+          value: caseNumber,
+          inline: true
+        },
+        {
+          name: "Reason",
+          value: reason,
+          inline: false
+        }
+      );
+
+    // Command actions already log themselves.
+    if (!pending) {
+      await sendLog(guild, embed);
+    }
+  } catch (error) {
+    console.error(
+      "Ban audit log error:",
+      error
+    );
+  }
+});
+
+// =====================================================
+// UNBAN LOG
+// =====================================================
+
+client.on("guildBanRemove", async ban => {
+  try {
+    const guild = ban.guild;
+    const user = ban.user;
+
+    const pending =
+      consumePendingAction(
+        guild.id,
+        "unban",
+        user.id
+      );
+
+    const audit =
+      await getRecentAuditEntry(
+        guild,
+        AuditLogEvent.MemberBanRemove,
+        user.id
+      );
+
+    const caseNumber =
+      pending?.caseNumber ||
+      getCaseNumber();
+
+    const moderator =
+      pending?.moderator ||
+      auditModerator(audit);
+
+    const reason =
+      pending?.reason ||
+      auditReason(audit);
+
+    const embed = baseEmbed(COLORS.success)
+      .setTitle("🔓 Member Unbanned")
+      .setDescription(
+        `<@${user.id}> has been unbanned from the server.`
+      )
+      .setThumbnail(
+        user.displayAvatarURL()
+      )
+      .addFields(
+        {
+          name: "User",
+          value: `${user} \`${user.tag}\``,
+          inline: true
+        },
+        {
+          name: "Moderator",
+          value: moderator,
+          inline: true
+        },
+        {
+          name: "Case",
+          value: caseNumber,
+          inline: true
+        },
+        {
+          name: "Reason",
+          value: reason,
+          inline: false
+        }
+      );
+
+    if (!pending) {
+      await sendLog(guild, embed);
+    }
+  } catch (error) {
+    console.error(
+      "Unban audit log error:",
+      error
+    );
+  }
+});
+
+// =====================================================
+// KICK LOG
+// =====================================================
+
+client.on("guildMemberRemove", async member => {
+  try {
+    const guild = member.guild;
+
+    // A ban also causes guildMemberRemove, so check
+    // the audit log for a real kick first.
+    const pending =
+      consumePendingAction(
+        guild.id,
+        "kick",
+        member.id
+      );
+
+    const audit =
+      await getRecentAuditEntry(
+        guild,
+        AuditLogEvent.MemberKick,
+        member.id
+      );
+
+    if (!pending && !audit) {
+      return;
+    }
+
+    const caseNumber =
+      pending?.caseNumber ||
+      getCaseNumber();
+
+    const moderator =
+      pending?.moderator ||
+      auditModerator(audit);
+
+    const reason =
+      pending?.reason ||
+      auditReason(audit);
+
+    const embed = baseEmbed(COLORS.danger)
+      .setTitle("👢 Member Kicked")
+      .setDescription(
+        `${member.user} has been kicked from the server.`
+      )
+      .setThumbnail(
+        member.user.displayAvatarURL()
+      )
+      .addFields(
+        {
+          name: "User",
+          value: `${member.user} \`${member.user.tag}\``,
+          inline: true
+        },
+        {
+          name: "Moderator",
+          value: moderator,
+          inline: true
+        },
+        {
+          name: "Case",
+          value: caseNumber,
+          inline: true
+        },
+        {
+          name: "Reason",
+          value: reason,
+          inline: false
+        }
+      );
+
+    // Save kick information so a later rejoin can be logged.
+    if (!guild._recentKickedMembers) {
+      guild._recentKickedMembers = new Map();
+    }
+
+    guild._recentKickedMembers.set(
+      member.id,
+      {
+        caseNumber,
+        moderator,
+        reason,
+        timestamp: Date.now()
+      }
+    );
+
+    setTimeout(() => {
+      const stored =
+        guild._recentKickedMembers?.get(
+          member.id
+        );
+
+      if (
+        stored &&
+        Date.now() - stored.timestamp >= 300000
+      ) {
+        guild._recentKickedMembers.delete(
+          member.id
+        );
+      }
+    }, 305000);
+
+    if (!pending) {
+      await sendLog(guild, embed);
+    }
+  } catch (error) {
+    console.error(
+      "Kick audit log error:",
+      error
+    );
+  }
+});
+
+// =====================================================
+// ROLE / TIMEOUT / PERMISSION LOGGING
+// =====================================================
+
+client.on(
+  "guildMemberUpdate",
+  async (oldMember, newMember) => {
+    try {
+      const guild = newMember.guild;
+
+      // =================================================
+      // TIMEOUT / UNTIMEOUT
+      // =================================================
+
+      const oldTimeout =
+        oldMember.communicationDisabledUntilTimestamp;
+
+      const newTimeout =
+        newMember.communicationDisabledUntilTimestamp;
+
+      if (
+        oldTimeout !== newTimeout
+      ) {
+        const action =
+          newTimeout
+            ? "mute"
+            : "unmute";
+
+        const pending =
+          consumePendingAction(
+            guild.id,
+            action,
+            newMember.id
+          );
+
+        const audit =
+          await getRecentAuditEntry(
+            guild,
+            AuditLogEvent.MemberUpdate,
+            newMember.id
+          );
+
+        const caseNumber =
+          pending?.caseNumber ||
+          getCaseNumber();
+
+        const moderator =
+          pending?.moderator ||
+          auditModerator(audit);
+
+        const reason =
+          pending?.reason ||
+          auditReason(audit);
+
+        const embed =
+          newTimeout
+            ? baseEmbed(COLORS.warning)
+                .setTitle("🔇 Member Muted")
+                .setDescription(
+                  `${newMember} has been timed out.`
+                )
+                .setThumbnail(
+                  newMember.user.displayAvatarURL()
+                )
+                .addFields(
+                  {
+                    name: "User",
+                    value: `${newMember} \`${newMember.user.tag}\``,
+                    inline: true
+                  },
+                  {
+                    name: "Moderator",
+                    value: moderator,
+                    inline: true
+                  },
+                  {
+                    name: "Case",
+                    value: caseNumber,
+                    inline: true
+                  },
+                  {
+                    name: "Duration",
+                    value: newTimeout
+                      ? `<t:${Math.floor(
+                          newTimeout / 1000
+                        )}:R>`
+                      : "Unknown",
+                    inline: true
+                  },
+                  {
+                    name: "Reason",
+                    value: reason,
+                    inline: false
+                  }
+                )
+            : baseEmbed(COLORS.success)
+                .setTitle("🔊 Member Unmuted")
+                .setDescription(
+                  `${newMember} is no longer timed out.`
+                )
+                .setThumbnail(
+                  newMember.user.displayAvatarURL()
+                )
+                .addFields(
+                  {
+                    name: "User",
+                    value: `${newMember} \`${newMember.user.tag}\``,
+                    inline: true
+                  },
+                  {
+                    name: "Moderator",
+                    value: moderator,
+                    inline: true
+                  },
+                  {
+                    name: "Case",
+                    value: caseNumber,
+                    inline: true
+                  },
+                  {
+                    name: "Reason",
+                    value: reason,
+                    inline: false
+                  }
+                );
+
+        if (!pending) {
+          await sendLog(
+            guild,
+            embed
+          );
+        }
+      }
+
+      // =================================================
+      // ROLE ADDED / REMOVED
+      // =================================================
+
+      const oldRoles =
+        oldMember.roles.cache;
+
+      const newRoles =
+        newMember.roles.cache;
+
+      const addedRoles =
+        newRoles.filter(
+          role =>
+            !oldRoles.has(role.id)
+        );
+
+      const removedRoles =
+        oldRoles.filter(
+          role =>
+            !newRoles.has(role.id)
+        );
+
+      for (const role of addedRoles.values()) {
+        const pending =
+          consumePendingAction(
+            guild.id,
+            "role-add",
+            `${newMember.id}:${role.id}`
+          );
+
+        const audit =
+          await getRecentAuditEntry(
+            guild,
+            AuditLogEvent.MemberRoleUpdate,
+            newMember.id
+          );
+
+        const caseNumber =
+          pending?.caseNumber ||
+          getCaseNumber();
+
+        const moderator =
+          pending?.moderator ||
+          auditModerator(audit);
+
+        const reason =
+          pending?.reason ||
+          auditReason(audit);
+
+        const embed =
+          baseEmbed(COLORS.success)
+            .setTitle("➕ Role Given")
+            .setDescription(
+              `${role} has been given to ${newMember}.`
+            )
+            .setThumbnail(
+              newMember.user.displayAvatarURL()
+            )
+            .addFields(
+              {
+                name: "User",
+                value: `${newMember} \`${newMember.user.tag}\``,
+                inline: true
+              },
+              {
+                name: "Role",
+                value: `${role}`,
+                inline: true
+              },
+              {
+                name: "Moderator",
+                value: moderator,
+                inline: true
+              },
+              {
+                name: "Case",
+                value: caseNumber,
+                inline: true
+              },
+              {
+                name: "Reason",
+                value: reason,
+                inline: false
+              }
+            );
+
+        if (!pending) {
+          await sendLog(
+            guild,
+            embed
+          );
+        }
+      }
+
+      for (const role of removedRoles.values()) {
+        const pending =
+          consumePendingAction(
+            guild.id,
+            "role-remove",
+            `${newMember.id}:${role.id}`
+          );
+
+        const audit =
+          await getRecentAuditEntry(
+            guild,
+            AuditLogEvent.MemberRoleUpdate,
+            newMember.id
+          );
+
+        const caseNumber =
+          pending?.caseNumber ||
+          getCaseNumber();
+
+        const moderator =
+          pending?.moderator ||
+          auditModerator(audit);
+
+        const reason =
+          pending?.reason ||
+          auditReason(audit);
+
+        const embed =
+          baseEmbed(COLORS.success)
+            .setTitle("➖ Role Removed")
+            .setDescription(
+              `${role} has been removed from ${newMember}.`
+            )
+            .setThumbnail(
+              newMember.user.displayAvatarURL()
+            )
+            .addFields(
+              {
+                name: "User",
+                value: `${newMember} \`${newMember.user.tag}\``,
+                inline: true
+              },
+              {
+                name: "Role",
+                value: `${role}`,
+                inline: true
+              },
+              {
+                name: "Moderator",
+                value: moderator,
+                inline: true
+              },
+              {
+                name: "Case",
+                value: caseNumber,
+                inline: true
+              },
+              {
+                name: "Reason",
+                value: reason,
+                inline: false
+              }
+            );
+
+        if (!pending) {
+          await sendLog(
+            guild,
+            embed
+          );
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Member update audit log error:",
+        error
+      );
+    }
+  }
+);
+
+// =====================================================
+// ROLE CREATED
+// =====================================================
+
+client.on("roleCreate", async role => {
+  try {
+    const guild = role.guild;
+
+    const audit =
+      await getRecentAuditEntry(
+        guild,
+        AuditLogEvent.RoleCreate,
+        role.id
+      );
+
+    const caseNumber =
+      getCaseNumber();
+
+    const moderator =
+      auditModerator(audit);
+
+    const reason =
+      auditReason(audit);
+
+    const embed =
+      baseEmbed(COLORS.success)
+        .setTitle("🎭 Role Created")
+        .setDescription(
+          `${role} has been created.`
+        )
+        .addFields(
+          {
+            name: "Role",
+            value: `${role} \`${role.name}\``,
+            inline: true
+          },
+          {
+            name: "Moderator",
+            value: moderator,
+            inline: true
+          },
+          {
+            name: "Case",
+            value: caseNumber,
+            inline: true
+          },
+          {
+            name: "Role ID",
+            value: role.id,
+            inline: false
+          },
+          {
+            name: "Reason",
+            value: reason,
+            inline: false
+          }
+        );
+
+    await sendLog(
+      guild,
+      embed
+    );
+  } catch (error) {
+    console.error(
+      "Role create log error:",
+      error
+    );
+  }
+});
+
+// =====================================================
+// ROLE DELETED
+// =====================================================
+
+client.on("roleDelete", async role => {
+  try {
+    const guild = role.guild;
+
+    const audit =
+      await getRecentAuditEntry(
+        guild,
+        AuditLogEvent.RoleDelete,
+        role.id
+      );
+
+    const caseNumber =
+      getCaseNumber();
+
+    const moderator =
+      auditModerator(audit);
+
+    const reason =
+      auditReason(audit);
+
+    const embed =
+      baseEmbed(COLORS.danger)
+        .setTitle("🗑️ Role Deleted")
+        .setDescription(
+          `A role has been deleted.`
+        )
+        .addFields(
+          {
+            name: "Role",
+            value: `\`${role.name}\``,
+            inline: true
+          },
+          {
+            name: "Moderator",
+            value: moderator,
+            inline: true
+          },
+          {
+            name: "Case",
+            value: caseNumber,
+            inline: true
+          },
+          {
+            name: "Role ID",
+            value: role.id,
+            inline: false
+          },
+          {
+            name: "Reason",
+            value: reason,
+            inline: false
+          }
+        );
+
+    await sendLog(
+      guild,
+      embed
+    );
+  } catch (error) {
+    console.error(
+      "Role delete log error:",
+      error
+    );
+  }
+});
+
+// =====================================================
+// ROLE UPDATED
+// =====================================================
+
+client.on(
+  "roleUpdate",
+  async (oldRole, newRole) => {
+    try {
+      const guild = newRole.guild;
+
+      const changes = [];
+
+      if (
+        oldRole.name !==
+        newRole.name
+      ) {
+        changes.push(
+          `**Name:** \`${oldRole.name}\` → \`${newRole.name}\``
+        );
+      }
+
+      if (
+        oldRole.hexColor !==
+        newRole.hexColor
+      ) {
+        changes.push(
+          `**Color:** \`${oldRole.hexColor}\` → \`${newRole.hexColor}\``
+        );
+      }
+
+      if (
+        oldRole.position !==
+        newRole.position
+      ) {
+        changes.push(
+          `**Position:** \`${oldRole.position}\` → \`${newRole.position}\``
+        );
+      }
+
+      if (
+        oldRole.hoist !==
+        newRole.hoist
+      ) {
+        changes.push(
+          `**Displayed Separately:** \`${oldRole.hoist}\` → \`${newRole.hoist}\``
+        );
+      }
+
+      if (
+        oldRole.mentionable !==
+        newRole.mentionable
+      ) {
+        changes.push(
+          `**Mentionable:** \`${oldRole.mentionable}\` → \`${newRole.mentionable}\``
+        );
+      }
+
+      // =================================================
+      // PERMISSION CHANGES
+      // =================================================
+
+      const oldPermissions =
+        new Set(
+          oldRole.permissions.toArray()
+        );
+
+      const newPermissions =
+        new Set(
+          newRole.permissions.toArray()
+        );
+
+      const addedPermissions =
+        [...newPermissions].filter(
+          permission =>
+            !oldPermissions.has(permission)
+        );
+
+      const removedPermissions =
+        [...oldPermissions].filter(
+          permission =>
+            !newPermissions.has(permission)
+        );
+
+      if (
+        addedPermissions.length
+      ) {
+        changes.push(
+          `**Permissions Added:** ${addedPermissions
+            .map(permission =>
+              `\`${permission}\``
+            )
+            .join(", ")}`
+        );
+      }
+
+      if (
+        removedPermissions.length
+      ) {
+        changes.push(
+          `**Permissions Removed:** ${removedPermissions
+            .map(permission =>
+              `\`${permission}\``
+            )
+            .join(", ")}`
+        );
+      }
+
+      if (!changes.length) {
+        return;
+      }
+
+      const audit =
+        await getRecentAuditEntry(
+          guild,
+          AuditLogEvent.RoleUpdate,
+          newRole.id
+        );
+
+      const caseNumber =
+        getCaseNumber();
+
+      const moderator =
+        auditModerator(audit);
+
+      const reason =
+        auditReason(audit);
+
+      const embed =
+        baseEmbed(COLORS.info)
+          .setTitle("🛠️ Role Updated")
+          .setDescription(
+            `${newRole} has been modified.`
+          )
+          .addFields(
+            {
+              name: "Role",
+              value: `${newRole} \`${newRole.name}\``,
+              inline: true
+            },
+            {
+              name: "Moderator",
+              value: moderator,
+              inline: true
+            },
+            {
+              name: "Case",
+              value: caseNumber,
+              inline: true
+            },
+            {
+              name: "Changes",
+              value:
+                changes.join("\n").slice(0, 1024),
+              inline: false
+            },
+            {
+              name: "Reason",
+              value: reason,
+              inline: false
+            }
+          );
+
+      await sendLog(
+        guild,
+        embed
+      );
+    } catch (error) {
+      console.error(
+        "Role update log error:",
+        error
+      );
+    }
+  }
+);
 
 // =====================================================
 // SLASH COMMAND HANDLER
@@ -1031,6 +2101,17 @@ client.on("interactionCreate", async interaction => {
       color: COLORS.danger
     });
 
+    registerPendingAction(
+      interaction.guild.id,
+      "kick",
+      target.id,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason
+      }
+    );
+
     try {
       await target.send({
         embeds: [
@@ -1140,6 +2221,17 @@ client.on("interactionCreate", async interaction => {
       caseNumber,
       color: COLORS.danger
     });
+
+    registerPendingAction(
+      interaction.guild.id,
+      "ban",
+      target.id,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason
+      }
+    );
 
     try {
       await target.send({
@@ -1276,6 +2368,17 @@ client.on("interactionCreate", async interaction => {
         text: "Mog Moderation"
       });
 
+    registerPendingAction(
+      interaction.guild.id,
+      "unban",
+      userId,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason
+      }
+    );
+
     try {
       await interaction.guild.members.unban(
         userId,
@@ -1283,6 +2386,12 @@ client.on("interactionCreate", async interaction => {
       );
     } catch (error) {
       console.error("Unban error:", error);
+
+      consumePendingAction(
+        interaction.guild.id,
+        "unban",
+        userId
+      );
 
       return interaction.reply({
         embeds: [
@@ -1397,6 +2506,17 @@ client.on("interactionCreate", async interaction => {
     }
 
     const caseNumber = getCaseNumber();
+
+    registerPendingAction(
+      interaction.guild.id,
+      "mute",
+      target.id,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason
+      }
+    );
 
     await target.timeout(
       duration,
@@ -1535,10 +2655,27 @@ client.on("interactionCreate", async interaction => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      interaction.guild.id,
+      "unmute",
+      target.id,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason
+      }
+    );
+
     try {
       await target.timeout(null, reason);
     } catch (error) {
       console.error("Unmute error:", error);
+
+      consumePendingAction(
+        interaction.guild.id,
+        "unmute",
+        target.id
+      );
 
       return interaction.reply({
         embeds: [
@@ -1686,6 +2823,17 @@ client.on("interactionCreate", async interaction => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      interaction.guild.id,
+      "role-add",
+      `${target.id}:${role.id}`,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason: `Added role: ${role.name}`
+      }
+    );
+
     try {
       await target.roles.add(
         role,
@@ -1693,6 +2841,12 @@ client.on("interactionCreate", async interaction => {
       );
     } catch (error) {
       console.error("Role add error:", error);
+
+      consumePendingAction(
+        interaction.guild.id,
+        "role-add",
+        `${target.id}:${role.id}`
+      );
 
       return interaction.reply({
         embeds: [
@@ -1840,6 +2994,17 @@ client.on("interactionCreate", async interaction => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      interaction.guild.id,
+      "role-remove",
+      `${target.id}:${role.id}`,
+      {
+        caseNumber,
+        moderator: interaction.user,
+        reason: `Removed role: ${role.name}`
+      }
+    );
+
     try {
       await target.roles.remove(
         role,
@@ -1847,6 +3012,12 @@ client.on("interactionCreate", async interaction => {
       );
     } catch (error) {
       console.error("Role remove error:", error);
+
+      consumePendingAction(
+        interaction.guild.id,
+        "role-remove",
+        `${target.id}:${role.id}`
+      );
 
       return interaction.reply({
         embeds: [
@@ -2332,6 +3503,17 @@ client.on("messageCreate", async message => {
       color: COLORS.danger
     });
 
+    registerPendingAction(
+      message.guild.id,
+      "kick",
+      target.id,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason
+      }
+    );
+
     await target.kick(reason);
 
     await message.reply({
@@ -2414,6 +3596,17 @@ client.on("messageCreate", async message => {
       caseNumber,
       color: COLORS.danger
     });
+
+    registerPendingAction(
+      message.guild.id,
+      "ban",
+      target.id,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason
+      }
+    );
 
     await target.ban({
       reason
@@ -2539,6 +3732,17 @@ client.on("messageCreate", async message => {
         text: "Mog Moderation"
       });
 
+    registerPendingAction(
+      message.guild.id,
+      "unban",
+      userId,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason
+      }
+    );
+
     try {
       await message.guild.members.unban(
         userId,
@@ -2546,6 +3750,12 @@ client.on("messageCreate", async message => {
       );
     } catch (error) {
       console.error("Unban error:", error);
+
+      consumePendingAction(
+        message.guild.id,
+        "unban",
+        userId
+      );
 
       return message.reply({
         embeds: [
@@ -2665,6 +3875,17 @@ client.on("messageCreate", async message => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      message.guild.id,
+      "mute",
+      target.id,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason
+      }
+    );
+
     await target.timeout(
       duration,
       reason
@@ -2766,10 +3987,27 @@ client.on("messageCreate", async message => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      message.guild.id,
+      "unmute",
+      target.id,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason
+      }
+    );
+
     try {
       await target.timeout(null, reason);
     } catch (error) {
       console.error("Unmute error:", error);
+
+      consumePendingAction(
+        message.guild.id,
+        "unmute",
+        target.id
+      );
 
       return message.reply({
         embeds: [
@@ -2908,6 +4146,17 @@ client.on("messageCreate", async message => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      message.guild.id,
+      "role-add",
+      `${target.id}:${role.id}`,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason: `Added role: ${role.name}`
+      }
+    );
+
     try {
       await target.roles.add(
         role,
@@ -2915,6 +4164,12 @@ client.on("messageCreate", async message => {
       );
     } catch (error) {
       console.error("Role add error:", error);
+
+      consumePendingAction(
+        message.guild.id,
+        "role-add",
+        `${target.id}:${role.id}`
+      );
 
       return message.reply({
         embeds: [
@@ -3053,6 +4308,17 @@ client.on("messageCreate", async message => {
 
     const caseNumber = getCaseNumber();
 
+    registerPendingAction(
+      message.guild.id,
+      "role-remove",
+      `${target.id}:${role.id}`,
+      {
+        caseNumber,
+        moderator: message.author,
+        reason: `Removed role: ${role.name}`
+      }
+    );
+
     try {
       await target.roles.remove(
         role,
@@ -3060,6 +4326,12 @@ client.on("messageCreate", async message => {
       );
     } catch (error) {
       console.error("Role remove error:", error);
+
+      consumePendingAction(
+        message.guild.id,
+        "role-remove",
+        `${target.id}:${role.id}`
+      );
 
       return message.reply({
         embeds: [

@@ -11,7 +11,10 @@ const {
   EmbedBuilder,
   REST,
   Routes,
-  AuditLogEvent
+  AuditLogEvent,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require("discord.js");
 
 // =====================================================
@@ -1724,6 +1727,21 @@ client.on(
 // =====================================================
 
 client.on("interactionCreate", async interaction => {
+  if (interaction.isButton() && ["mog_copy_ltc", "mog_copy_pp"].includes(interaction.customId)) {
+    if (interaction.guildId !== "1520043179607461961") {
+      return interaction.reply({ content: "This button is only available in the authorised server.", ephemeral: true });
+    }
+
+    const copyText = interaction.customId === "mog_copy_ltc"
+      ? "LfSz3uX1ksZi8SHZpEeNAENTnF7KmhmDwe"
+      : "https://www.paypal.me/Hadiakbari105";
+
+    return interaction.reply({
+      content: copyText,
+      ephemeral: true
+    });
+  }
+
   if (!interaction.isChatInputCommand()) {
     return;
   }
@@ -1772,7 +1790,15 @@ client.on("interactionCreate", async interaction => {
         })
         .setFooter({ text: "Mog Moderation • Litecoin" });
 
-      return interaction.reply({ embeds: [embed] });
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("mog_copy_ltc")
+          .setLabel("Copy LTC Address")
+          .setEmoji("📋")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      return interaction.reply({ embeds: [embed], components: [buttons] });
     }
 
     const embed = baseEmbed(0x0070BA)
@@ -1784,7 +1810,15 @@ client.on("interactionCreate", async interaction => {
       })
       .setFooter({ text: "Mog Moderation • PayPal" });
 
-    return interaction.reply({ embeds: [embed] });
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("mog_copy_pp")
+        .setLabel("Copy PayPal Link")
+        .setEmoji("📋")
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    return interaction.reply({ embeds: [embed], components: [buttons] });
   }
 
   // ===================================================

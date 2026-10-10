@@ -660,6 +660,16 @@ const slashCommands = [
   {
     name: "stopjoindm",
     description: "Disable the automatic welcome DM"
+  },
+
+  {
+    name: "ltc",
+    description: "Show my Litecoin wallet address"
+  },
+
+  {
+    name: "pp",
+    description: "Show my PayPal payment link"
   }
 ];
 
@@ -1732,6 +1742,50 @@ client.on("interactionCreate", async interaction => {
 
   const command = interaction.commandName;
   const member = interaction.member;
+
+  // ===================================================
+  // /LTC AND /PP — AUTHORISED SERVER ONLY
+  // ===================================================
+
+  const PAYMENT_SERVER_ID = "1520043179607461961";
+
+  if (command === "ltc" || command === "pp") {
+    if (interaction.guildId !== PAYMENT_SERVER_ID) {
+      return interaction.reply({
+        embeds: [
+          errorEmbed(
+            "Server Restricted",
+            "This command can only be used in the authorised server."
+          )
+        ],
+        ephemeral: true
+      });
+    }
+
+    if (command === "ltc") {
+      const embed = baseEmbed(0x345D9D)
+        .setTitle("Ł Litecoin Payment")
+        .setDescription("Send Litecoin to the wallet address below.")
+        .addFields({
+          name: "Litecoin Address",
+          value: "`LfSz3uX1ksZi8SHZpEeNAENTnF7KmhmDwe`"
+        })
+        .setFooter({ text: "Mog Moderation • Litecoin" });
+
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    const embed = baseEmbed(0x0070BA)
+      .setTitle("💙 PayPal Payment")
+      .setDescription("Use the link below to send a payment through PayPal.")
+      .addFields({
+        name: "PayPal Link",
+        value: "https://www.paypal.me/Hadiakbari105"
+      })
+      .setFooter({ text: "Mog Moderation • PayPal" });
+
+    return interaction.reply({ embeds: [embed] });
+  }
 
   // ===================================================
   // /COMMANDS

@@ -14,7 +14,8 @@ const {
   AuditLogEvent,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  ActivityType
 } = require("discord.js");
 
 // =====================================================
@@ -710,6 +711,8 @@ function parseDuration(input) {
 
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
+
+  client.user.setActivity("Monitoring the server", { type: ActivityType.Watching });
 
   try {
     const rest = new REST({

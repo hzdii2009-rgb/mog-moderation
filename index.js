@@ -668,12 +668,16 @@ const slashCommands = [
 
   {
     name: "ltc",
-    description: "Show my Litecoin wallet address"
+    description: "Show my Litecoin wallet address",
+    integration_types: [0, 1],
+    contexts: [0, 1, 2]
   },
 
   {
     name: "pp",
-    description: "Show my PayPal payment link"
+    description: "Show my PayPal payment link",
+    integration_types: [0, 1],
+    contexts: [0, 1, 2]
   }
 ];
 
@@ -1730,9 +1734,14 @@ client.on(
 // =====================================================
 
 client.on("interactionCreate", async interaction => {
+  // Payment commands are allowed in the authorised server or through a User Install.
+  const paymentAllowed = interaction.guildId === "1520043179607461961" ||
+    Boolean(interaction.authorizingIntegrationOwners?.get?.(1) ??
+      interaction.authorizingIntegrationOwners?.[1]);
+
   if (interaction.isButton() && ["mog_copy_ltc", "mog_copy_pp"].includes(interaction.customId)) {
-    if (interaction.guildId !== "1520043179607461961") {
-      return interaction.reply({ content: "This button is only available in the authorised server.", ephemeral: true });
+    if (!paymentAllowed) {
+      return interaction.reply({ content: "This button is only available in the authorised server or through My Apps.", ephemeral: true });
     }
 
     const copyText = interaction.customId === "mog_copy_ltc"
@@ -1749,34 +1758,20 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  if (!interaction.guild) {
-    return interaction.reply({
-      embeds: [
-        errorEmbed(
-          "Server Only",
-          "This command can only be used inside a server."
-        )
-      ],
-      ephemeral: true
-    });
-  }
-
   const command = interaction.commandName;
   const member = interaction.member;
 
   // ===================================================
-  // /LTC AND /PP — AUTHORISED SERVER ONLY
+  // /LTC AND /PP — AUTHORISED SERVER OR USER INSTALL
   // ===================================================
 
-  const PAYMENT_SERVER_ID = "1520043179607461961";
-
   if (command === "ltc" || command === "pp") {
-    if (interaction.guildId !== PAYMENT_SERVER_ID) {
+    if (!paymentAllowed) {
       return interaction.reply({
         embeds: [
           errorEmbed(
             "Server Restricted",
-            "This command can only be used in the authorised server."
+            "This command can only be used in the authorised server or through My Apps."
           )
         ],
         ephemeral: true
@@ -1822,6 +1817,14 @@ client.on("interactionCreate", async interaction => {
     );
 
     return interaction.reply({ embeds: [embed], components: [buttons] });
+  }
+
+  // All other commands remain server-only.
+  if (!interaction.guild) {
+    return interaction.reply({
+      embeds: [errorEmbed("Server Only", "This command can only be used inside a server.")],
+      ephemeral: true
+    });
   }
 
   // ===================================================

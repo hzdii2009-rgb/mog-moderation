@@ -15,7 +15,8 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ActivityType
+  ActivityType,
+  Partials
 } = require("discord.js");
 
 // =====================================================
@@ -27,6 +28,8 @@ const LOG_CHANNEL_NAME = "mod-logs";
 
 const WARNINGS_FILE = path.join(__dirname, "warnings.json");
 const JOINDM_FILE = path.join(__dirname, "joindm.json");
+const MESSAGE_LOGS_FILE = path.join(__dirname, "messagelogs.json");
+const MESSAGE_LOGS_GUILD_ID = "1520043179607461961";
 
 const client = new Client({
   intents: [
@@ -35,7 +38,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration
-  ]
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.User]
 });
 
 // =====================================================
@@ -53,6 +57,7 @@ function ensureFile(file, defaultData = {}) {
 
 ensureFile(WARNINGS_FILE, {});
 ensureFile(JOINDM_FILE, {});
+ensureFile(MESSAGE_LOGS_FILE, {});
 
 // =====================================================
 // WARNINGS
@@ -129,6 +134,154 @@ function saveJoinDM() {
     console.error("Error saving joindm.json:", error);
   }
 }
+
+// =====================================================
+// MESSAGE LOG SETTINGS AND RECENT MESSAGE CACHE
+// =====================================================
+
+let messageLogSettings = {};
+try {
+  messageLogSettings = JSON.parse(fs.readFileSync(MESSAGE_LOGS_FILE, "utf8")) || {};
+} catch (error) {
+  console.error("Could not load message log settings:", error);
+}
+
+function saveMessageLogSettings() {
+  try {
+    fs.writeFileSync(MESSAGE_LOGS_FILE, JSON.stringify(messageLogSettings, null, 2));
+  } catch (error) {
+    console.error("Could not save message log settings:", error);
+  }
+}
+
+const recentMessages = new Map();
+const MAX_RECENT_MESSAGES = 10000;
+
+function messageSnapshot(message) {
+  return {
+    id: message.id,
+    guildId: message.guildId,
+    channelId: message.channelId,
+    authorId: message.author?.id || null,
+    authorTag: message.author?.tag || "Unknown",
+    content: message.content || "",
+    attachments: [...(message.attachments?.values() || [])].map(a => ({
+      name: a.name || "attachment",
+      url: a.url,
+      contentType: a.contentType || ""
+    })),
+    stickers: [...(message.stickers?.values() || [])].map(sticker => sticker.name),
+    embeds: (message.embeds || []).map(embed => embed.url).filter(Boolean),
+    savedAt: Date.now()
+  };
+}
+
+function rememberMessage(message) {
+  if (!message.guild || message.author?.bot || message.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  recentMessages.delete(message.id);
+  recentMessages.set(message.id, messageSnapshot(message));
+  while (recentMessages.size > MAX_RECENT_MESSAGES) {
+    recentMessages.delete(recentMessages.keys().next().value);
+  }
+}
+
+function logMessageContent(snapshot) {
+  const pieces = [];
+  if (snapshot.content) pieces.push(snapshot.content);
+  if (snapshot.attachments?.length) {
+    pieces.push("Attachments:\n" + snapshot.attachments.map(a => `${a.name}: ${a.url}`).join("\n"));
+  }
+  if (snapshot.stickers?.length) pieces.push("Stickers: " + snapshot.stickers.join(", "));
+  if (snapshot.embeds?.length) pieces.push("Embed links:\n" + snapshot.embeds.join("\n"));
+  return (pieces.join("\n\n") || "(No content available)").slice(0, 1000);
+}
+
+function getMessageLogChannel(guild) {
+  if (guild.id !== MESSAGE_LOGS_GUILD_ID) return null;
+  const settings = messageLogSettings[guild.id];
+  if (settings?.enabled === false) return null;
+  const channel = settings?.channelId
+    ? guild.channels.cache.get(settings.channelId)
+    : guild.channels.cache.find(ch => ch.name === "message-logs" && ch.isTextBased());
+  return channel?.isTextBased() && !channel.isThread() ? channel : null;
+}
+
+async function sendMessageLog(guild, embed) {
+  const channel = getMessageLogChannel(guild);
+  if (!channel) return;
+  try {
+    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  } catch (error) {
+    console.error("Message log send failed:", error);
+  }
+}
+
+client.on("messageCreate", message => {
+  rememberMessage(message);
+});
+
+client.on("messageDelete", async message => {
+  if (!message.guild || message.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  const stored = recentMessages.get(message.id);
+  recentMessages.delete(message.id);
+  const data = stored || messageSnapshot(message);
+  if (data.authorId === client.user?.id) return;
+  const channel = getMessageLogChannel(message.guild);
+  if (!channel || message.channelId === channel.id) return;
+  const embed = baseEmbed(COLORS.danger)
+    .setTitle("🗑️ Message Deleted")
+    .addFields(
+      { name: "Author", value: data.authorId ? `<@${data.authorId}> (\`${data.authorTag}\`)` : "Unknown", inline: true },
+      { name: "Channel", value: `<#${message.channelId}>`, inline: true },
+      { name: "Deleted Content", value: logMessageContent(data) }
+    );
+  const image = data.attachments?.find(a => a.contentType?.startsWith("image/"));
+  if (image) embed.setImage(image.url);
+  await sendMessageLog(message.guild, embed);
+});
+
+client.on("messageUpdate", async (oldMessage, newMessage) => {
+  if (!newMessage.guild || newMessage.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  const previous = recentMessages.get(newMessage.id) || messageSnapshot(oldMessage);
+  const updated = messageSnapshot(newMessage);
+  // Partial updates can lack content; do not overwrite known data with an empty snapshot.
+  if (newMessage.partial || !newMessage.author) return;
+  rememberMessage(newMessage);
+  if (newMessage.author?.bot) return;
+  const channel = getMessageLogChannel(newMessage.guild);
+  if (!channel || newMessage.channelId === channel.id) return;
+  if (logMessageContent(previous) === logMessageContent(updated)) return;
+  const embed = baseEmbed(COLORS.info)
+    .setTitle("✏️ Message Edited")
+    .addFields(
+      { name: "Author", value: `<@${newMessage.author.id}> (\`${newMessage.author.tag}\`)`, inline: true },
+      { name: "Channel", value: `<#${newMessage.channelId}>`, inline: true },
+      { name: "Before", value: logMessageContent(previous) },
+      { name: "After", value: logMessageContent(updated) },
+      { name: "Message", value: `[Jump to message](${newMessage.url})` }
+    );
+  await sendMessageLog(newMessage.guild, embed);
+});
+
+client.on("messageDeleteBulk", async messages => {
+  const first = messages.first();
+  if (!first?.guild || first.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  const channel = getMessageLogChannel(first.guild);
+  if (!channel || first.channelId === channel.id) return;
+  for (const message of messages.values()) {
+    const data = recentMessages.get(message.id) || messageSnapshot(message);
+    recentMessages.delete(message.id);
+    if (data.authorId === client.user?.id) continue;
+    const embed = baseEmbed(COLORS.danger)
+      .setTitle("🗑️ Message Bulk Deleted")
+      .addFields(
+        { name: "Author", value: data.authorId ? `<@${data.authorId}> (\`${data.authorTag}\`)` : "Unknown", inline: true },
+        { name: "Channel", value: `<#${message.channelId}>`, inline: true },
+        { name: "Deleted Content", value: logMessageContent(data) }
+      );
+    await sendMessageLog(first.guild, embed);
+  }
+});
 
 // =====================================================
 // CASE NUMBERS
@@ -664,6 +817,33 @@ const slashCommands = [
   {
     name: "stopjoindm",
     description: "Disable the automatic welcome DM"
+  },
+
+  {
+    name: "setmessagelogs",
+    description: "Choose the channel for deleted and edited message logs",
+    options: [{
+      name: "channel",
+      description: "Channel where message logs will be sent",
+      type: 7,
+      channel_types: [0, 5],
+      required: true
+    }]
+  },
+
+  {
+    name: "messagelogs",
+    description: "Turn message logging off or on",
+    options: [{
+      name: "action",
+      description: "Enable or disable message logging",
+      type: 3,
+      required: true,
+      choices: [
+        { name: "off", value: "off" },
+        { name: "on", value: "on" }
+      ]
+    }]
   },
 
   {
@@ -1828,6 +2008,39 @@ client.on("interactionCreate", async interaction => {
   }
 
   // ===================================================
+  // MESSAGE LOG CONFIGURATION (AUTHORISED SERVER ONLY)
+  // ===================================================
+
+  if (command === "setmessagelogs" || command === "messagelogs") {
+    if (interaction.guildId !== MESSAGE_LOGS_GUILD_ID) {
+      return interaction.reply({ embeds: [errorEmbed("Server Restricted", "Message logging is only available in the authorised server.")], ephemeral: true });
+    }
+    if (!isModerator(member)) {
+      return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure message logs.")], ephemeral: true });
+    }
+    if (command === "setmessagelogs") {
+      const channel = interaction.options.getChannel("channel");
+      const bot = interaction.guild.members.me;
+      const permissions = channel.permissionsFor(bot);
+      if (!permissions?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks])) {
+        return interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need View Channel, Send Messages and Embed Links in that channel.")], ephemeral: true });
+      }
+      messageLogSettings[interaction.guildId] = { enabled: true, channelId: channel.id };
+      saveMessageLogSettings();
+      return interaction.reply({ embeds: [successEmbed("Message Logs Enabled", `Deleted and edited messages will be logged in ${channel}.`)], ephemeral: true });
+    }
+    const action = interaction.options.getString("action");
+    const current = messageLogSettings[interaction.guildId] || {};
+    messageLogSettings[interaction.guildId] = { ...current, enabled: action === "on" };
+    saveMessageLogSettings();
+    const channel = getMessageLogChannel(interaction.guild);
+    if (action === "on" && !channel) {
+      return interaction.reply({ embeds: [errorEmbed("Logging Channel Missing", "Logging was enabled, but I couldn't find its channel. Create #message-logs or use /setmessagelogs.")], ephemeral: true });
+    }
+    return interaction.reply({ embeds: [successEmbed("Message Logs", action === "on" ? `Message logging is now enabled in ${channel}.` : "Message logging is now disabled.")], ephemeral: true });
+  }
+
+  // ===================================================
   // /COMMANDS
   // ===================================================
 
@@ -1868,7 +2081,9 @@ client.on("interactionCreate", async interaction => {
           value:
             "`/joindm <message>`\n" +
             "`/editjoindm <message>`\n" +
-            "`/stopjoindm`"
+            "`/stopjoindm`\n" +
+            "`/setmessagelogs #channel`\n" +
+            "`/messagelogs on|off`"
         },
         {
           name: "⌨️ Prefix Commands",

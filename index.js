@@ -29,7 +29,6 @@ const LOG_CHANNEL_NAME = "mod-logs";
 const WARNINGS_FILE = path.join(__dirname, "warnings.json");
 const JOINDM_FILE = path.join(__dirname, "joindm.json");
 const MESSAGE_LOGS_FILE = path.join(__dirname, "messagelogs.json");
-const MESSAGE_LOGS_GUILD_ID = "1520043179607461961";
 
 const client = new Client({
   intents: [
@@ -177,7 +176,7 @@ function messageSnapshot(message) {
 }
 
 function rememberMessage(message) {
-  if (!message.guild || message.author?.bot || message.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!message.guild || message.author?.bot) return;
   recentMessages.delete(message.id);
   recentMessages.set(message.id, messageSnapshot(message));
   while (recentMessages.size > MAX_RECENT_MESSAGES) {
@@ -197,7 +196,6 @@ function logMessageContent(snapshot) {
 }
 
 function getMessageLogChannel(guild) {
-  if (guild.id !== MESSAGE_LOGS_GUILD_ID) return null;
   const settings = messageLogSettings[guild.id];
   if (settings?.enabled === false) return null;
   const channel = settings?.channelId
@@ -221,7 +219,7 @@ client.on("messageCreate", message => {
 });
 
 client.on("messageDelete", async message => {
-  if (!message.guild || message.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!message.guild) return;
   const stored = recentMessages.get(message.id);
   recentMessages.delete(message.id);
   const data = stored || messageSnapshot(message);
@@ -241,7 +239,7 @@ client.on("messageDelete", async message => {
 });
 
 client.on("messageUpdate", async (oldMessage, newMessage) => {
-  if (!newMessage.guild || newMessage.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!newMessage.guild) return;
   const previous = recentMessages.get(newMessage.id) || messageSnapshot(oldMessage);
   const updated = messageSnapshot(newMessage);
   // Partial updates can lack content; do not overwrite known data with an empty snapshot.
@@ -265,7 +263,7 @@ client.on("messageUpdate", async (oldMessage, newMessage) => {
 
 client.on("messageDeleteBulk", async messages => {
   const first = messages.first();
-  if (!first?.guild || first.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!first?.guild) return;
   const channel = getMessageLogChannel(first.guild);
   if (!channel || first.channelId === channel.id) return;
   for (const message of messages.values()) {
@@ -817,6 +815,17 @@ const slashCommands = [
   {
     name: "stopjoindm",
     description: "Disable the automatic welcome DM"
+  },
+
+  {
+    name: "purge",
+    description: "Delete up to 1000 recent messages in this channel",
+    options: [{ name: "amount", description: "Number of messages (1-1000)", type: 4, required: true, min_value: 1, max_value: 1000 }]
+  },
+
+  {
+    name: "chatcleanup",
+    description: "Recreate this channel with a clean message history (irreversible)"
   },
 
   {
@@ -2008,13 +2017,66 @@ client.on("interactionCreate", async interaction => {
   }
 
   // ===================================================
-  // MESSAGE LOG CONFIGURATION (AUTHORISED SERVER ONLY)
+  // PURGE / CHANNEL CLEANUP
+  // ===================================================
+
+  if (command === "purge" || command === "chatcleanup") {
+    if (!isModerator(member)) {
+      return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can use this command.")], ephemeral: true });
+    }
+    if (!interaction.channel || interaction.channel.type !== 0) {
+      return interaction.reply({ embeds: [errorEmbed("Text Channel Only", "Use this command in a regular text channel.")], ephemeral: true });
+    }
+    if (command === "purge") {
+      const amount = interaction.options.getInteger("amount");
+      if (!Number.isInteger(amount) || amount < 1 || amount > 1000) {
+        return interaction.reply({ embeds: [errorEmbed("Invalid Amount", "Choose a number from 1 to 1000.")], ephemeral: true });
+      }
+      const botPerms = interaction.channel.permissionsFor(interaction.guild.members.me);
+      if (!botPerms?.has([PermissionsBitField.Flags.ManageMessages, PermissionsBitField.Flags.ReadMessageHistory])) {
+        return interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need Manage Messages and Read Message History here.")], ephemeral: true });
+      }
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        const result = await purgeChannelMessages(interaction.channel, amount);
+        return interaction.editReply({ embeds: [successEmbed("Messages Purged", `Deleted **${result.deleted}** messages out of **${amount}** requested.${result.skipped ? `\n**${result.skipped}** messages were too old for Discord bulk deletion.` : ""}`)] });
+      } catch (error) {
+        console.error("Purge failed:", error);
+        return interaction.editReply({ embeds: [errorEmbed("Purge Failed", "I couldn't finish deleting messages. Check my permissions and try again.")] });
+      }
+    }
+    const botPerms = interaction.channel.permissionsFor(interaction.guild.members.me);
+    if (!botPerms?.has(PermissionsBitField.Flags.ManageChannels)) {
+      return interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need Manage Channels to recreate this channel.")], ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const oldChannel = interaction.channel;
+      const replacement = await oldChannel.clone({ reason: `Chat cleanup requested by ${interaction.user.tag}` });
+      await replacement.permissionOverwrites.set([{
+        id: interaction.guild.roles.everyone.id,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory]
+      }], `Public chat cleanup by ${interaction.user.tag}`);
+      await replacement.setPosition(oldChannel.position);
+      // Retain configured message-log channel if it was the recreated channel.
+      if (messageLogSettings[interaction.guildId]?.channelId === oldChannel.id) {
+        messageLogSettings[interaction.guildId].channelId = replacement.id;
+        saveMessageLogSettings();
+      }
+      await oldChannel.delete(`Chat cleanup requested by ${interaction.user.tag}`);
+      await replacement.send({ embeds: [successEmbed("Chat Cleaned", `This channel was recreated by ${interaction.user}. Everyone can view it, send messages and read message history.`)], allowedMentions: { parse: [] } });
+    } catch (error) {
+      console.error("Chat cleanup failed:", error);
+      try { await interaction.editReply({ embeds: [errorEmbed("Chat Cleanup Failed", "I couldn't recreate the channel. Check Manage Channels permission.")] }); } catch {}
+    }
+    return;
+  }
+
+  // ===================================================
+  // MESSAGE LOG CONFIGURATION (PER-SERVER)
   // ===================================================
 
   if (command === "setmessagelogs" || command === "messagelogs") {
-    if (interaction.guildId !== MESSAGE_LOGS_GUILD_ID) {
-      return interaction.reply({ embeds: [errorEmbed("Server Restricted", "Message logging is only available in the authorised server.")], ephemeral: true });
-    }
     if (!isModerator(member)) {
       return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure message logs.")], ephemeral: true });
     }
@@ -2082,6 +2144,8 @@ client.on("interactionCreate", async interaction => {
             "`/joindm <message>`\n" +
             "`/editjoindm <message>`\n" +
             "`/stopjoindm`\n" +
+            "`/purge <amount>`\n" +
+            "`/chatcleanup`\n" +
             "`/setmessagelogs #channel`\n" +
             "`/messagelogs on|off`"
         },
@@ -2099,7 +2163,8 @@ client.on("interactionCreate", async interaction => {
             "`?unrole @user @role`\n" +
             "`?joindm <message>`\n" +
             "`?editjoindm <message>`\n" +
-            "`?stopjoindm`"
+            "`?stopjoindm`\n" +
+            "`?purge <amount>`"
         },
         {
           name: "📌 Join DM Variables",
@@ -3462,6 +3527,33 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+// Delete in batches of 100, respecting Discord's 14-day bulk-delete limit.
+async function purgeChannelMessages(channel, amount) {
+  let deleted = 0;
+  let skipped = 0;
+  let before;
+  while (deleted < amount) {
+    const remaining = amount - deleted;
+    const fetched = await channel.messages.fetch({ limit: Math.min(100, remaining), ...(before ? { before } : {}) });
+    if (!fetched.size) break;
+    before = fetched.last().id;
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    const recent = fetched.filter(m => m.createdTimestamp > cutoff);
+    skipped += fetched.size - recent.size;
+    if (recent.size === 1) {
+      await recent.first().delete();
+      deleted++;
+    } else if (recent.size > 1) {
+      const removed = await channel.bulkDelete(recent, true);
+      deleted += removed.size;
+    }
+    if (fetched.size < Math.min(100, remaining)) break;
+    // If all remaining messages are older than 14 days, stop.
+    if (recent.size === 0) break;
+  }
+  return { deleted, skipped };
+}
+
 // =====================================================
 // PREFIX COMMANDS
 // =====================================================
@@ -3499,7 +3591,8 @@ client.on("messageCreate", async message => {
     "unrole",
     "joindm",
     "editjoindm",
-    "stopjoindm"
+    "stopjoindm",
+    "purge"
   ];
 
   if (moderationCommands.includes(command)) {
@@ -3513,6 +3606,29 @@ client.on("messageCreate", async message => {
         ]
       });
     }
+  }
+
+  if (command === "purge") {
+    const amount = Number(args[0]);
+    if (!Number.isInteger(amount) || amount < 1 || amount > 1000) {
+      return message.reply({ embeds: [errorEmbed("Invalid Amount", "Use `?purge <amount>` (1-1000).") ] });
+    }
+    if (message.channel.type !== 0) return;
+    const botPerms = message.channel.permissionsFor(message.guild.members.me);
+    if (!botPerms?.has([PermissionsBitField.Flags.ManageMessages, PermissionsBitField.Flags.ReadMessageHistory])) {
+      return message.reply({ embeds: [errorEmbed("Missing Permissions", "I need Manage Messages and Read Message History.")] });
+    }
+    try {
+      // Delete the invoking command, then delete the requested number of other messages.
+      await message.delete().catch(() => {});
+      const result = await purgeChannelMessages(message.channel, amount);
+      const notice = await message.channel.send({ embeds: [successEmbed("Messages Purged", `Deleted **${result.deleted}** messages.${result.skipped ? ` ${result.skipped} older messages could not be bulk deleted.` : ""}`)] });
+      setTimeout(() => notice.delete().catch(() => {}), 5000);
+    } catch (error) {
+      console.error("Prefix purge failed:", error);
+      await message.channel.send({ embeds: [errorEmbed("Purge Failed", "Could not finish deleting messages.")] }).catch(() => {});
+    }
+    return;
   }
 
   // ===================================================

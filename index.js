@@ -3624,94 +3624,104 @@ client.on("messageCreate", async message => {
   // ===================================================
 
   if (command === "ban") {
-    const target =
-      message.mentions.members.first();
+    const rawTarget = args[0];
+    const reason = args.slice(1).join(" ") || "No reason provided";
 
-    const reason =
-      args.slice(1).join(" ") ||
-      "No reason provided";
-
-    if (!target) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "User Not Found",
-            "Mention a member to ban."
-          )
-        ]
-      });
+    if (!rawTarget) {
+      return message.reply({ embeds: [errorEmbed(
+        "Missing User", "Use `?ban @user [reason]`, `?ban USER_ID [reason]`, or `?ban ExactUsername [reason]`."
+      )] });
     }
 
-    if (!canModerate(message.member, target)) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Cannot Ban User",
-            "You cannot ban yourself, the server owner, or a member with an equal/higher role."
-          )
-        ]
-      });
+    if (!message.guild.members.me.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+      return message.reply({ embeds: [errorEmbed(
+        "Missing Permission", "I need the **Ban Members** permission."
+      )] });
     }
 
-    if (!botCanModerate(message.guild, target)) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Role Hierarchy",
-            "My role must be higher than the target user's highest role."
-          )
-        ]
-      });
+    const mentionedId = rawTarget.match(/^<@!?(\d{17,20})>$/)?.[1];
+    const targetId = mentionedId || (/^\d{17,20}$/.test(rawTarget) ? rawTarget : null);
+    let target = null;
+    let user = null;
+
+    if (targetId) {
+      target = await message.guild.members.fetch(targetId).catch(() => null);
+      user = target?.user || await client.users.fetch(targetId).catch(() => null);
+      if (!user) {
+        return message.reply({ embeds: [errorEmbed("User Not Found", "No Discord user was found with that ID.")] });
+      }
+    } else {
+      // Only exact usernames are accepted; never pick a partial match.
+      await message.guild.members.fetch().catch(() => null);
+      const matches = message.guild.members.cache.filter(
+        member => member.user.username.toLowerCase() === rawTarget.toLowerCase()
+      );
+      if (matches.size !== 1) {
+        return message.reply({ embeds: [errorEmbed(
+          matches.size > 1 ? "Ambiguous Username" : "User Not Found",
+          matches.size > 1
+            ? "Multiple members have that username. Use a mention or user ID instead."
+            : "No server member has that exact username. Use their Discord user ID if they left the server."
+        )] });
+      }
+      target = matches.first();
+      user = target.user;
     }
 
-    if (
-      !message.guild.members.me.permissions.has(
-        PermissionsBitField.Flags.BanMembers
-      )
-    ) {
-      return message.reply({
-        embeds: [
-          errorEmbed(
-            "Missing Permission",
-            "I need the **Ban Members** permission."
-          )
-        ]
-      });
+    if (user.id === message.author.id || user.id === message.guild.ownerId || user.id === client.user.id) {
+      return message.reply({ embeds: [errorEmbed("Cannot Ban User", "You cannot ban yourself, the server owner, or the bot.")] });
+    }
+
+    if (target && !canModerate(message.member, target)) {
+      return message.reply({ embeds: [errorEmbed(
+        "Cannot Ban User", "You cannot ban a member with an equal/higher role."
+      )] });
+    }
+
+    if (target && !botCanModerate(message.guild, target)) {
+      return message.reply({ embeds: [errorEmbed(
+        "Role Hierarchy", "My role must be higher than the target user's highest role."
+      )] });
     }
 
     const caseNumber = getCaseNumber();
+    const embed = target
+      ? moderationEmbed({
+          title: "🔨 Member Banned",
+          description: `${target} has been banned from the server.`,
+          target,
+          moderator: message.author,
+          reason,
+          caseNumber,
+          color: COLORS.danger
+        })
+      : baseEmbed(COLORS.danger)
+          .setTitle("🔨 Member Banned")
+          .setDescription(`${user} has been banned from the server.`)
+          .setThumbnail(user.displayAvatarURL())
+          .addFields(
+            { name: "User", value: `${user} \`${user.tag}\``, inline: true },
+            { name: "Moderator", value: `${message.author}`, inline: true },
+            { name: "Case", value: caseNumber, inline: true },
+            { name: "Reason", value: reason, inline: false }
+          );
 
-    const embed = moderationEmbed({
-      title: "🔨 Member Banned",
-      description: `${target} has been banned from the server.`,
-      target,
-      moderator: message.author,
-      reason,
+    try {
+      await message.guild.members.ban(user.id, { reason });
+    } catch (error) {
+      return message.reply({ embeds: [errorEmbed(
+        "Ban Failed", `Discord couldn't ban that user: ${error.message}`
+      )] });
+    }
+
+    registerPendingAction(message.guild.id, "ban", user.id, {
       caseNumber,
-      color: COLORS.danger
-    });
-
-    registerPendingAction(
-      message.guild.id,
-      "ban",
-      target.id,
-      {
-        caseNumber,
-        moderator: message.author,
-        reason
-      }
-    );
-
-    await target.ban({
+      moderator: message.author,
       reason
     });
 
-    await message.reply({
-      embeds: [embed]
-    });
-
+    await message.reply({ embeds: [embed] });
     await sendLog(message.guild, embed);
-
     return;
   }
 

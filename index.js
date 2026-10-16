@@ -5043,6 +5043,15 @@ client.on("shardDisconnect", (event, shardId) => {
 
 initializeJoinDM()
   .then(async () => {
+    console.log("Database initialized. Checking Discord API connectivity...");
+    try {
+      const response = await fetch("https://discord.com/api/v10/gateway", {
+        signal: AbortSignal.timeout(10000)
+      });
+      console.log(`Discord API connectivity: HTTP ${response.status}`);
+    } catch (error) {
+      console.error("Discord API connectivity failed:", error);
+    }
     console.log("Database initialized. Attempting Discord login...");
     const timeout = setTimeout(() => {
       console.error("Discord login has not completed after 30 seconds.");

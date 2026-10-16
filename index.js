@@ -107,32 +107,71 @@ function getUserWarnings(guildId, userId) {
 // JOIN DM
 // =====================================================
 
-function loadJoinDM() {
+// Persistent Join DM storage (Render Postgres). Set DATABASE_URL in Render.
+// Existing joindm.json is imported once if it is present on first connection.
+const { Pool } = require("pg");
+const joinDMPool = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 10000 })
+  : null;
+let joinDMReady = false;
+let joinDM = {};
+
+async function initializeJoinDM() {
+  if (!joinDMPool) {
+    console.warn("DATABASE_URL not configured. Join DM commands will be unavailable until persistent storage is configured.");
+    return;
+  }
   try {
-    const data = fs.readFileSync(JOINDM_FILE, "utf8");
-
-    if (!data.trim()) {
-      return {};
+    await joinDMPool.query(`CREATE TABLE IF NOT EXISTS mog_join_dms (
+      guild_id TEXT PRIMARY KEY,
+      enabled BOOLEAN NOT NULL,
+      message TEXT NOT NULL
+    )`);
+    // Import settings from an existing file, without replacing database settings.
+    if (fs.existsSync(JOINDM_FILE)) {
+      try {
+        const oldSettings = JSON.parse(fs.readFileSync(JOINDM_FILE, "utf8"));
+        for (const [guildId, settings] of Object.entries(oldSettings)) {
+          if (settings && typeof settings.message === "string") {
+            await joinDMPool.query(
+              "INSERT INTO mog_join_dms (guild_id, enabled, message) VALUES ($1, $2, $3) ON CONFLICT (guild_id) DO NOTHING",
+              [guildId, settings.enabled === true, settings.message]
+            );
+          }
+        }
+      } catch (error) {
+        console.error("Could not import old joindm.json:", error);
+      }
     }
-
-    return JSON.parse(data);
+    const result = await joinDMPool.query("SELECT guild_id, enabled, message FROM mog_join_dms");
+    joinDM = Object.fromEntries(result.rows.map(row => [row.guild_id, { enabled: row.enabled, message: row.message }]));
+    joinDMReady = true;
+    console.log(`Persistent Join DM storage ready (${result.rowCount} servers).`);
   } catch (error) {
-    console.error("Error loading joindm.json:", error);
-    return {};
+    joinDMReady = false;
+    console.error("Persistent Join DM database unavailable:", error);
   }
 }
 
-let joinDM = loadJoinDM();
+async function saveJoinDM(guildId) {
+  if (!joinDMPool || !joinDMReady) throw new Error("Join DM database is not configured or ready");
+  const settings = joinDM[guildId];
+  if (!settings) throw new Error("No Join DM settings to save");
+  await joinDMPool.query(
+    `INSERT INTO mog_join_dms (guild_id, enabled, message) VALUES ($1, $2, $3)
+     ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled, message = EXCLUDED.message`,
+    [guildId, settings.enabled, settings.message]
+  );
+}
 
-function saveJoinDM() {
-  try {
-    fs.writeFileSync(
-      JOINDM_FILE,
-      JSON.stringify(joinDM, null, 2)
-    );
-  } catch (error) {
-    console.error("Error saving joindm.json:", error);
-  }
+async function setJoinDM(guildId, settings) {
+  if (!joinDMPool || !joinDMReady) throw new Error("Join DM database is not configured or ready");
+  await joinDMPool.query(
+    `INSERT INTO mog_join_dms (guild_id, enabled, message) VALUES ($1, $2, $3)
+     ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled, message = EXCLUDED.message`,
+    [guildId, settings.enabled, settings.message]
+  );
+  joinDM[guildId] = { ...settings };
 }
 
 // =====================================================
@@ -3490,12 +3529,12 @@ client.on("interactionCreate", async interaction => {
     const message =
       interaction.options.getString("message");
 
-    joinDM[interaction.guild.id] = {
-      enabled: true,
-      message
-    };
-
-    saveJoinDM();
+    try {
+      await setJoinDM(interaction.guild.id, { enabled: true, message });
+    } catch (error) {
+      console.error("Join DM save failed:", error);
+      return interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Set DATABASE_URL to a persistent PostgreSQL database in Render, then redeploy.")], ephemeral: true });
+    }
 
     const embed = baseEmbed(COLORS.success)
       .setTitle("👋 Join DM Enabled")
@@ -3535,9 +3574,12 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    joinDM[interaction.guild.id].message = message;
-
-    saveJoinDM();
+    try {
+      await setJoinDM(interaction.guild.id, { ...joinDM[interaction.guild.id], message });
+    } catch (error) {
+      console.error("Join DM update failed:", error);
+      return interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")], ephemeral: true });
+    }
 
     const embed = baseEmbed(COLORS.success)
       .setTitle("✏️ Join DM Updated")
@@ -3571,9 +3613,12 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    joinDM[interaction.guild.id].enabled = false;
-
-    saveJoinDM();
+    try {
+      await setJoinDM(interaction.guild.id, { ...joinDM[interaction.guild.id], enabled: false });
+    } catch (error) {
+      console.error("Join DM disable failed:", error);
+      return interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")], ephemeral: true });
+    }
 
     return interaction.reply({
       embeds: [
@@ -4850,12 +4895,12 @@ client.on("messageCreate", async message => {
       });
     }
 
-    joinDM[message.guild.id] = {
-      enabled: true,
-      message: messageText
-    };
-
-    saveJoinDM();
+    try {
+      await setJoinDM(message.guild.id, { enabled: true, message: messageText });
+    } catch (error) {
+      console.error("Join DM save failed:", error);
+      return message.reply({ embeds: [errorEmbed("Storage Unavailable", "Set DATABASE_URL to a persistent PostgreSQL database in Render, then redeploy.")] });
+    }
 
     return message.reply({
       embeds: [
@@ -4902,10 +4947,12 @@ client.on("messageCreate", async message => {
       });
     }
 
-    joinDM[message.guild.id].message =
-      messageText;
-
-    saveJoinDM();
+    try {
+      await setJoinDM(message.guild.id, { ...joinDM[message.guild.id], message: messageText });
+    } catch (error) {
+      console.error("Join DM update failed:", error);
+      return message.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")] });
+    }
 
     return message.reply({
       embeds: [
@@ -4936,9 +4983,12 @@ client.on("messageCreate", async message => {
       });
     }
 
-    joinDM[message.guild.id].enabled = false;
-
-    saveJoinDM();
+    try {
+      await setJoinDM(message.guild.id, { ...joinDM[message.guild.id], enabled: false });
+    } catch (error) {
+      console.error("Join DM disable failed:", error);
+      return message.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")] });
+    }
 
     return message.reply({
       embeds: [
@@ -4979,4 +5029,7 @@ if (!process.env.DISCORD_TOKEN) {
   process.exit(1);
 }
 
-client.login(process.env.DISCORD_TOKEN);
+initializeJoinDM().then(() => client.login(process.env.DISCORD_TOKEN)).catch(error => {
+  console.error("Startup failed:", error);
+  process.exitCode = 1;
+});

@@ -5029,7 +5029,31 @@ if (!process.env.DISCORD_TOKEN) {
   process.exit(1);
 }
 
-initializeJoinDM().then(() => client.login(process.env.DISCORD_TOKEN)).catch(error => {
-  console.error("Startup failed:", error);
-  process.exitCode = 1;
+client.on("error", error => {
+  console.error("Discord client error:", error);
 });
+
+client.on("shardError", error => {
+  console.error("Discord shard error:", error);
+});
+
+client.on("shardDisconnect", (event, shardId) => {
+  console.error(`Discord shard ${shardId} disconnected (code ${event.code}).`);
+});
+
+initializeJoinDM()
+  .then(async () => {
+    console.log("Database initialized. Attempting Discord login...");
+    const timeout = setTimeout(() => {
+      console.error("Discord login has not completed after 30 seconds.");
+    }, 30000);
+    try {
+      await client.login(process.env.DISCORD_TOKEN);
+      console.log("Discord login request completed.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  })
+  .catch(error => {
+    console.error("Discord startup/login failed:", error);
+  });

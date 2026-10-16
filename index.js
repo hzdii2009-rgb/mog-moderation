@@ -259,7 +259,7 @@ client.on("messageCreate", async message => {
   rememberMessage(message);
 
   // Automatically heart new user messages in any channel named #vouches.
-  if (!message.guild || message.author?.bot || !message.channel?.name?.includes("vouches")) return;
+  if (!message.guild || message.author?.bot || message.channel?.name !== "vouches") return;
   try {
     await message.react("❤️");
   } catch (error) {
@@ -3631,6 +3631,30 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+// Send a moderation notice without preventing the moderation action if DMs are blocked.
+async function sendModerationNotice(user, guild, action, reason, caseNumber, moderator, warningCount = null) {
+  const info = {
+    warn: { title: "⚠️ You have been warned", color: COLORS.warning, verb: "warned in" },
+    kick: { title: "👢 You have been kicked", color: COLORS.danger, verb: "kicked from" },
+    ban: { title: "🔨 You have been banned", color: COLORS.danger, verb: "banned from" }
+  }[action];
+  if (!info || !user) return;
+  const embed = baseEmbed(info.color)
+    .setTitle(info.title)
+    .setDescription(`You have been ${info.verb} **${guild.name}**.`)
+    .addFields(
+      { name: "Reason", value: String(reason || "No reason provided").slice(0, 1024) },
+      { name: "Moderator", value: `${moderator}`, inline: true },
+      { name: "Case", value: String(caseNumber), inline: true }
+    );
+  if (warningCount !== null) embed.addFields({ name: "Total Warnings", value: String(warningCount), inline: true });
+  try {
+    await user.send({ embeds: [embed] });
+  } catch (error) {
+    console.log(`Could not DM ${user.tag || user.id} about ${action}: ${error.message}`);
+  }
+}
+
 // =====================================================
 // PREFIX COMMANDS
 // =====================================================
@@ -3856,6 +3880,7 @@ client.on("messageCreate", async message => {
     });
 
     await sendLog(message.guild, embed);
+    await sendModerationNotice(target.user, message.guild, "warn", reason, caseNumber, message.author, userWarnings.length);
 
     return;
   }
@@ -4019,6 +4044,8 @@ client.on("messageCreate", async message => {
       }
     );
 
+    await sendModerationNotice(target.user, message.guild, "kick", reason, caseNumber, message.author);
+
     await target.kick(reason);
 
     await message.reply({
@@ -4116,6 +4143,8 @@ client.on("messageCreate", async message => {
             { name: "Case", value: caseNumber, inline: true },
             { name: "Reason", value: reason, inline: false }
           );
+
+    await sendModerationNotice(user, message.guild, "ban", reason, caseNumber, message.author);
 
     try {
       await message.guild.members.ban(user.id, { reason });

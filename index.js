@@ -216,8 +216,16 @@ async function sendMessageLog(guild, embed) {
   }
 }
 
-client.on("messageCreate", message => {
+client.on("messageCreate", async message => {
   rememberMessage(message);
+
+  // Automatically heart new user messages in any channel named #vouches.
+  if (!message.guild || message.author?.bot || message.channel?.name !== "vouches") return;
+  try {
+    await message.react("❤️");
+  } catch (error) {
+    console.error(`Could not react to a vouch in ${message.guild.name}:`, error);
+  }
 });
 
 client.on("messageDelete", async message => {

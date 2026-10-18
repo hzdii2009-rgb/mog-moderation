@@ -259,7 +259,7 @@ client.on("messageCreate", async message => {
   rememberMessage(message);
 
   // Automatically heart new user messages in any channel named #vouches.
-  if (!message.guild || message.author?.bot || !message.channel?.name?.toLowerCase().includes("vouches") return;
+  if (!message.guild || message.author?.bot || !message.channel?.name?.toLowerCase().includes("vouches")) return;
   try {
     await message.react("❤️");
   } catch (error) {

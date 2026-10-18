@@ -663,6 +663,22 @@ const slashCommands = [
   },
 
   {
+    name: "avatar",
+    description: "Show a user's profile picture",
+    options: [{
+      name: "user",
+      description: "User whose avatar you want to see (defaults to you)",
+      type: 6,
+      required: false
+    }]
+  },
+
+  {
+    name: "uptime",
+    description: "Show how long Mog Moderation has been online"
+  },
+
+  {
     name: "warn",
     description: "Warn a member",
     options: [
@@ -2201,6 +2217,38 @@ client.on("interactionCreate", async interaction => {
   }
 
   // ===================================================
+  // /AVATAR
+  // ===================================================
+
+  if (command === "avatar") {
+    const user = interaction.options.getUser("user") || interaction.user;
+    const avatar = user.displayAvatarURL({ size: 4096, extension: "png", forceStatic: false });
+    const embed = baseEmbed(COLORS.info)
+      .setTitle(`🖼️ ${user.username}'s Avatar`)
+      .setDescription(`[View full-size avatar](${avatar})`)
+      .setImage(avatar);
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ===================================================
+  // /UPTIME
+  // ===================================================
+
+  if (command === "uptime") {
+    const startedAt = Math.floor((client.readyTimestamp || Date.now()) / 1000);
+    const embed = baseEmbed(COLORS.success)
+      .setTitle("🟢 Mog Moderation • Uptime")
+      .setDescription("Mog Moderation is currently online.")
+      .addFields(
+        { name: "Status", value: "🟢 Online", inline: true },
+        { name: "Online Since", value: `<t:${startedAt}:R>`, inline: true },
+        { name: "Started At", value: `<t:${startedAt}:F>`, inline: false }
+      );
+
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ===================================================
   // /COMMANDS
   // ===================================================
 
@@ -2250,15 +2298,15 @@ client.on("interactionCreate", async interaction => {
         {
           name: "⌨️ Prefix Commands",
           value:
-            "`?warn @user [reason]`\n" +
+            "`?warn @user/USER_ID [reason]`\n" +
             "`?unwarn @user`\n" +
-            "`?kick @user [reason]`\n" +
+            "`?kick @user/USER_ID [reason]`\n" +
             "`?ban @user [reason]`\n" +
             "`?unban <userid> [reason]`\n" +
             "`?mute @user <duration> [reason]`\n" +
             "`?unmute @user [reason]`\n" +
-            "`?role @user @role`\n" +
-            "`?unrole @user @role`\n" +
+            "`?role @user/USER_ID @role/ROLE_ID`\n" +
+            "`?unrole @user/USER_ID @role/ROLE_ID`\n" +
             "`?joindm <message>`\n" +
             "`?editjoindm <message>`\n" +
             "`?stopjoindm`\n" +
@@ -3655,6 +3703,27 @@ async function sendModerationNotice(user, guild, action, reason, caseNumber, mod
   }
 }
 
+// Resolve a guild member by mention, user ID, or exact username.
+async function resolvePrefixMember(guild, input) {
+  if (!input) return null;
+  const id = input.match(/^<@!?(\d{17,20})>$/)?.[1] || (/^\d{17,20}$/.test(input) ? input : null);
+  if (id) return guild.members.fetch(id).catch(() => null);
+  await guild.members.fetch().catch(() => null);
+  const matches = guild.members.cache.filter(m =>
+    m.user.username.toLowerCase() === input.toLowerCase()
+  );
+  return matches.size === 1 ? matches.first() : null;
+}
+
+// Resolve a role by mention, role ID, or exact name.
+function resolvePrefixRole(guild, input) {
+  if (!input) return null;
+  const id = input.match(/^<@&(\d{17,20})>$/)?.[1] || (/^\d{17,20}$/.test(input) ? input : null);
+  if (id) return guild.roles.cache.get(id) || null;
+  const matches = guild.roles.cache.filter(r => r.name.toLowerCase() === input.toLowerCase());
+  return matches.size === 1 ? matches.first() : null;
+}
+
 // =====================================================
 // PREFIX COMMANDS
 // =====================================================
@@ -3780,15 +3849,15 @@ client.on("messageCreate", async message => {
         {
           name: "⌨️ Prefix Commands",
           value:
-            "`?warn @user [reason]`\n" +
+            "`?warn @user/USER_ID [reason]`\n" +
             "`?unwarn @user`\n" +
-            "`?kick @user [reason]`\n" +
+            "`?kick @user/USER_ID [reason]`\n" +
             "`?ban @user [reason]`\n" +
             "`?unban <userid> [reason]`\n" +
             "`?mute @user <duration> [reason]`\n" +
             "`?unmute @user [reason]`\n" +
-            "`?role @user @role`\n" +
-            "`?unrole @user @role`\n" +
+            "`?role @user/USER_ID @role/ROLE_ID`\n" +
+            "`?unrole @user/USER_ID @role/ROLE_ID`\n" +
             "`?joindm <message>`\n" +
             "`?editjoindm <message>`\n" +
             "`?stopjoindm`"
@@ -3816,8 +3885,7 @@ client.on("messageCreate", async message => {
   // ===================================================
 
   if (command === "warn") {
-    const target =
-      message.mentions.members.first();
+    const target = await resolvePrefixMember(message.guild, args[0]);
 
     const reason =
       args.slice(1).join(" ") ||
@@ -3828,7 +3896,7 @@ client.on("messageCreate", async message => {
         embeds: [
           errorEmbed(
             "User Not Found",
-            "Mention a member to warn.\n\nExample: `?warn @user spam`"
+            "Provide a member mention or user ID to warn.\n\nExample: `?warn @user spam`"
           )
         ]
       });
@@ -3966,8 +4034,7 @@ client.on("messageCreate", async message => {
   // ===================================================
 
   if (command === "kick") {
-    const target =
-      message.mentions.members.first();
+    const target = await resolvePrefixMember(message.guild, args[0]);
 
     const reason =
       args.slice(1).join(" ") ||
@@ -3978,7 +4045,7 @@ client.on("messageCreate", async message => {
         embeds: [
           errorEmbed(
             "User Not Found",
-            "Mention a member to kick."
+            "Provide a member mention or user ID to kick."
           )
         ]
       });
@@ -4587,18 +4654,16 @@ client.on("messageCreate", async message => {
   // ===================================================
 
   if (command === "role") {
-    const target =
-      message.mentions.members.first();
+    const target = await resolvePrefixMember(message.guild, args[0]);
 
-    const role =
-      message.mentions.roles.first();
+    const role = resolvePrefixRole(message.guild, args[1]);
 
     if (!target || !role) {
       return message.reply({
         embeds: [
           errorEmbed(
             "Missing Information",
-            "Mention a member and a role.\n\nExample: `?role @user @role`"
+            "Provide a member mention/ID and role mention/ID.\n\nExample: `?role @user/USER_ID @role/ROLE_ID`"
           )
         ]
       });
@@ -4749,18 +4814,16 @@ client.on("messageCreate", async message => {
   // ===================================================
 
   if (command === "unrole") {
-    const target =
-      message.mentions.members.first();
+    const target = await resolvePrefixMember(message.guild, args[0]);
 
-    const role =
-      message.mentions.roles.first();
+    const role = resolvePrefixRole(message.guild, args[1]);
 
     if (!target || !role) {
       return message.reply({
         embeds: [
           errorEmbed(
             "Missing Information",
-            "Mention a member and a role.\n\nExample: `?unrole @user @role`"
+            "Provide a member mention/ID and role mention/ID.\n\nExample: `?unrole @user/USER_ID @role/ROLE_ID`"
           )
         ]
       });

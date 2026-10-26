@@ -2233,7 +2233,15 @@ client.on("interactionCreate", async interaction => {
         selfDeaf: true,
         selfMute: false
       });
-      await entersState(connection, VoiceConnectionStatus.Ready, 20000);
+      // Diagnostic logging for the Discord voice handshake.
+      console.log(`[VOICE] Starting connection in guild ${interaction.guildId}, channel ${voiceChannel.id}`);
+      connection.on("stateChange", (oldState, newState) => {
+        console.log(`[VOICE] ${oldState.status} -> ${newState.status}`);
+      });
+      connection.on("error", error => {
+        console.error("[VOICE ERROR]", error);
+      });
+      await entersState(connection, VoiceConnectionStatus.Ready, 60000);
       return interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use `/disconnect` or the bot restarts, unless Discord disconnects me.`)] });
     } catch (error) {
       console.error("Voice connection failed:", error);

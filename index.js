@@ -2256,7 +2256,7 @@ client.on("interactionCreate", async interaction => {
         console.error("[VOICE ERROR]", error);
       });
       await entersState(connection, VoiceConnectionStatus.Ready, 60000);
-      return interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use `/disconnect` or the bot restarts, unless Discord disconnects me.`)] });
+      return interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use /disconnect or the bot restarts, unless Discord disconnects me.`)] });
     } catch (error) {
       console.error("Voice connection failed:", error);
       getVoiceConnection(interaction.guildId)?.destroy();

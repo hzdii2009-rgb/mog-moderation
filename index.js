@@ -18,6 +18,7 @@ const {
   ActivityType,
   Partials
 } = require("discord.js");
+const { joinVoiceChannel, getVoiceConnection, VoiceConnectionStatus, entersState } = require("@discordjs/voice");
 
 // =====================================================
 // CONFIG
@@ -29,7 +30,7 @@ const LOG_CHANNEL_NAME = "mod-logs";
 const WARNINGS_FILE = path.join(__dirname, "warnings.json");
 const JOINDM_FILE = path.join(__dirname, "joindm.json");
 const MESSAGE_LOGS_FILE = path.join(__dirname, "messagelogs.json");
-const MESSAGE_LOGS_GUILD_ID = "1520043179607461961";
+const MOD_LOGS_FILE = path.join(__dirname, "modlogs.json");
 
 const client = new Client({
   intents: [
@@ -37,7 +38,8 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildModeration
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates
   ],
   partials: [Partials.Message, Partials.Channel, Partials.User]
 });
@@ -58,6 +60,7 @@ function ensureFile(file, defaultData = {}) {
 ensureFile(WARNINGS_FILE, {});
 ensureFile(JOINDM_FILE, {});
 ensureFile(MESSAGE_LOGS_FILE, {});
+ensureFile(MOD_LOGS_FILE, {});
 
 // =====================================================
 // WARNINGS
@@ -178,6 +181,14 @@ async function setJoinDM(guildId, settings) {
 // MESSAGE LOG SETTINGS AND RECENT MESSAGE CACHE
 // =====================================================
 
+let modLogSettings = {};
+try { modLogSettings = JSON.parse(fs.readFileSync(MOD_LOGS_FILE, "utf8")) || {}; }
+catch (error) { console.error("Could not load moderation log settings:", error); }
+function saveModLogSettings() {
+  try { fs.writeFileSync(MOD_LOGS_FILE, JSON.stringify(modLogSettings, null, 2)); }
+  catch (error) { console.error("Could not save moderation log settings:", error); }
+}
+
 let messageLogSettings = {};
 try {
   messageLogSettings = JSON.parse(fs.readFileSync(MESSAGE_LOGS_FILE, "utf8")) || {};
@@ -216,7 +227,7 @@ function messageSnapshot(message) {
 }
 
 function rememberMessage(message) {
-  if (!message.guild || message.author?.bot || message.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!message.guild || message.author?.bot) return;
   recentMessages.delete(message.id);
   recentMessages.set(message.id, messageSnapshot(message));
   while (recentMessages.size > MAX_RECENT_MESSAGES) {
@@ -236,7 +247,6 @@ function logMessageContent(snapshot) {
 }
 
 function getMessageLogChannel(guild) {
-  if (guild.id !== MESSAGE_LOGS_GUILD_ID) return null;
   const settings = messageLogSettings[guild.id];
   if (settings?.enabled === false) return null;
   const channel = settings?.channelId
@@ -258,7 +268,7 @@ async function sendMessageLog(guild, embed) {
 client.on("messageCreate", async message => {
   rememberMessage(message);
 
-  // Automatically heart new user messages in any channel named #vouches.
+  // Automatically heart new user messages in any channel whose name contains "vouches".
   if (!message.guild || message.author?.bot || !message.channel?.name?.toLowerCase().includes("vouches")) return;
   try {
     await message.react("❤️");
@@ -268,7 +278,7 @@ client.on("messageCreate", async message => {
 });
 
 client.on("messageDelete", async message => {
-  if (!message.guild || message.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!message.guild) return;
   const stored = recentMessages.get(message.id);
   recentMessages.delete(message.id);
   const data = stored || messageSnapshot(message);
@@ -288,7 +298,7 @@ client.on("messageDelete", async message => {
 });
 
 client.on("messageUpdate", async (oldMessage, newMessage) => {
-  if (!newMessage.guild || newMessage.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!newMessage.guild) return;
   const previous = recentMessages.get(newMessage.id) || messageSnapshot(oldMessage);
   const updated = messageSnapshot(newMessage);
   // Partial updates can lack content; do not overwrite known data with an empty snapshot.
@@ -312,7 +322,7 @@ client.on("messageUpdate", async (oldMessage, newMessage) => {
 
 client.on("messageDeleteBulk", async messages => {
   const first = messages.first();
-  if (!first?.guild || first.guildId !== MESSAGE_LOGS_GUILD_ID) return;
+  if (!first?.guild) return;
   const channel = getMessageLogChannel(first.guild);
   if (!channel || first.channelId === channel.id) return;
   for (const message of messages.values()) {
@@ -488,18 +498,13 @@ function botCanManageRole(guild, role) {
 
 async function sendLog(guild, embed) {
   try {
-    const channel = guild.channels.cache.find(
-      ch =>
-        ch.name === LOG_CHANNEL_NAME &&
-        ch.isTextBased()
-    );
+    const settings = modLogSettings[guild.id];
+    if (settings?.enabled === false) return;
+    const channel = settings?.channelId
+      ? guild.channels.cache.get(settings.channelId)
+      : guild.channels.cache.find(ch => ch.name === LOG_CHANNEL_NAME && ch.isTextBased());
 
-    if (!channel) {
-      console.log(
-        `#${LOG_CHANNEL_NAME} was not found in ${guild.name}`
-      );
-      return;
-    }
+    if (!channel?.isTextBased() || channel.isThread()) return;
 
     await channel.send({
       embeds: [embed]
@@ -907,6 +912,26 @@ const slashCommands = [
         { name: "on", value: "on" }
       ]
     }]
+  },
+
+  {
+    name: "connect",
+    description: "Join your voice channel and stay until disconnected"
+  },
+  {
+    name: "disconnect",
+    description: "Disconnect Mog Moderation from voice"
+  },
+  {
+    name: "setlogs",
+    description: "Choose the channel for moderation and audit logs",
+    options: [{ name: "channel", description: "Channel for moderation logs", type: 7, channel_types: [0, 5], required: true }]
+  },
+  {
+    name: "logs",
+    description: "Enable or disable moderation and audit logs",
+    options: [{ name: "action", description: "Turn moderation logs on or off", type: 3, required: true,
+      choices: [{ name: "on", value: "on" }, { name: "off", value: "off" }] }]
   },
 
   {
@@ -2145,13 +2170,10 @@ client.on("interactionCreate", async interaction => {
   }
 
   // ===================================================
-  // MESSAGE LOG CONFIGURATION (AUTHORISED SERVER ONLY)
+  // MESSAGE LOG CONFIGURATION (PER SERVER)
   // ===================================================
 
   if (command === "setmessagelogs" || command === "messagelogs") {
-    if (interaction.guildId !== MESSAGE_LOGS_GUILD_ID) {
-      return interaction.reply({ embeds: [errorEmbed("Server Restricted", "Message logging is only available in the authorised server.")], ephemeral: true });
-    }
     if (!isModerator(member)) {
       return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure message logs.")], ephemeral: true });
     }
@@ -2175,6 +2197,74 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ embeds: [errorEmbed("Logging Channel Missing", "Logging was enabled, but I couldn't find its channel. Create #message-logs or use /setmessagelogs.")], ephemeral: true });
     }
     return interaction.reply({ embeds: [successEmbed("Message Logs", action === "on" ? `Message logging is now enabled in ${channel}.` : "Message logging is now disabled.")], ephemeral: true });
+  }
+
+  // ===================================================
+  // VOICE CONNECTION — ONE CONNECTION PER SERVER
+  // ===================================================
+  if (command === "connect" || command === "disconnect") {
+    if (!isModerator(member)) {
+      return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can control voice connections.")], ephemeral: true });
+    }
+    if (command === "disconnect") {
+      const connection = getVoiceConnection(interaction.guildId);
+      if (!connection) return interaction.reply({ embeds: [errorEmbed("Not Connected", "I'm not connected to a voice channel in this server.")], ephemeral: true });
+      connection.destroy();
+      return interaction.reply({ embeds: [successEmbed("Disconnected", "I left the voice channel.")] });
+    }
+    const voiceChannel = interaction.guild.members.cache.get(interaction.user.id)?.voice?.channel
+      || (await interaction.guild.members.fetch(interaction.user.id).catch(() => null))?.voice?.channel;
+    if (!voiceChannel) return interaction.reply({ embeds: [errorEmbed("Join Voice First", "Join a voice channel before using `/connect`.")], ephemeral: true });
+    const me = interaction.guild.members.me || await interaction.guild.members.fetchMe();
+    const perms = voiceChannel.permissionsFor(me);
+    if (!perms?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect])) {
+      return interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need View Channel and Connect permissions in your voice channel.")], ephemeral: true });
+    }
+    const existing = getVoiceConnection(interaction.guildId);
+    if (existing && existing.state.status !== VoiceConnectionStatus.Destroyed) {
+      return interaction.reply({ embeds: [errorEmbed("Already Connected", "I'm already connected in this server. Use `/disconnect` before moving me.")], ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: interaction.guildId,
+        adapterCreator: interaction.guild.voiceAdapterCreator,
+        selfDeaf: true,
+        selfMute: false
+      });
+      await entersState(connection, VoiceConnectionStatus.Ready, 20000);
+      return interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use `/disconnect` or the bot restarts, unless Discord disconnects me.`)] });
+    } catch (error) {
+      console.error("Voice connection failed:", error);
+      getVoiceConnection(interaction.guildId)?.destroy();
+      return interaction.editReply({ embeds: [errorEmbed("Connection Failed", "Couldn't join voice. Check Connect permissions and Render logs.")] });
+    }
+  }
+
+  // ===================================================
+  // MODERATION LOG CONFIGURATION (PER SERVER)
+  // ===================================================
+  if (command === "setlogs" || command === "logs") {
+    if (!isModerator(member)) return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure moderation logs.")], ephemeral: true });
+    if (command === "setlogs") {
+      const channel = interaction.options.getChannel("channel");
+      const perms = channel.permissionsFor(interaction.guild.members.me);
+      if (!perms?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks])) {
+        return interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need View Channel, Send Messages and Embed Links in that channel.")], ephemeral: true });
+      }
+      modLogSettings[interaction.guildId] = { enabled: true, channelId: channel.id };
+      saveModLogSettings();
+      return interaction.reply({ embeds: [successEmbed("Moderation Logs Enabled", `Moderation and audit logs will be sent to ${channel}.`)], ephemeral: true });
+    }
+    const enabled = interaction.options.getString("action") === "on";
+    const current = modLogSettings[interaction.guildId] || {};
+    const channel = current.channelId ? interaction.guild.channels.cache.get(current.channelId)
+      : interaction.guild.channels.cache.find(ch => ch.name === LOG_CHANNEL_NAME && ch.isTextBased());
+    if (enabled && !channel) return interaction.reply({ embeds: [errorEmbed("Channel Missing", "Create #mod-logs or use `/setlogs` first.")], ephemeral: true });
+    modLogSettings[interaction.guildId] = { ...current, enabled };
+    saveModLogSettings();
+    return interaction.reply({ embeds: [successEmbed("Moderation Logs", enabled ? `Moderation logs are enabled in ${channel}.` : "Moderation logs are disabled.")], ephemeral: true });
   }
 
   // ===================================================
@@ -2293,7 +2383,10 @@ client.on("interactionCreate", async interaction => {
             "`/editjoindm <message>`\n" +
             "`/stopjoindm`\n" +
             "`/setmessagelogs #channel`\n" +
-            "`/messagelogs on|off`"
+            "`/messagelogs on|off`\n" +
+            "`/setlogs #channel`\n" +
+            "`/logs on|off`\n" +
+            "`/connect` / `/disconnect`"
         },
         {
           name: "⌨️ Prefix Commands",

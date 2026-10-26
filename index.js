@@ -45,6 +45,20 @@ const client = new Client({
 });
 
 // =====================================================
+// VOICE GATEWAY DIAGNOSTICS (SAFE: NO TOKENS OR ENDPOINTS)
+// =====================================================
+// Helps determine whether Discord delivers the two gateway events
+// required for @discordjs/voice to complete the signalling stage.
+client.on("raw", packet => {
+  if (packet.t === "VOICE_STATE_UPDATE" && packet.d?.user_id === client.user?.id) {
+    console.log(`[VOICE DEBUG] Bot voice state received (guild ${packet.d.guild_id}, channel ${packet.d.channel_id ?? "none"})`);
+  }
+  if (packet.t === "VOICE_SERVER_UPDATE") {
+    console.log(`[VOICE DEBUG] Voice server update received (guild ${packet.d?.guild_id})`);
+  }
+});
+
+// =====================================================
 // FILE SETUP
 // =====================================================
 

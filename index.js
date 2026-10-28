@@ -5215,7 +5215,18 @@ client.on("messageCreate", async message => {
 const app = express();
 
 app.get("/", (req, res) => {
-  res.send("Mog Moderation is online.");
+  // Render web availability is separate from the Discord gateway connection.
+  res.send(client.isReady()
+    ? "Mog Moderation web server is live. Discord: connected."
+    : "Mog Moderation web server is live. Discord: not connected.");
+});
+
+app.get("/health", (req, res) => {
+  res.status(client.isReady() ? 200 : 503).json({
+    web: "running",
+    discord: client.isReady() ? "connected" : "disconnected",
+    guilds: client.isReady() ? client.guilds.cache.size : 0
+  });
 });
 
 const PORT = process.env.PORT || 3000;
@@ -5225,51 +5236,60 @@ app.listen(PORT, () => {
 });
 
 // =====================================================
-// LOGIN
+// DISCORD LOGIN / STARTUP DIAGNOSTICS
 // =====================================================
 
 if (!process.env.DISCORD_TOKEN) {
-  console.error(
-    "DISCORD_TOKEN is missing from environment variables."
-  );
-
+  console.error("[STARTUP] DISCORD_TOKEN is missing from environment variables.");
   process.exit(1);
 }
 
 client.on("error", error => {
-  console.error("Discord client error:", error);
+  console.error("[DISCORD ERROR]", error);
 });
 
 client.on("shardError", error => {
-  console.error("Discord shard error:", error);
+  console.error("[SHARD ERROR]", error);
 });
 
 client.on("shardDisconnect", (event, shardId) => {
-  console.error(`Discord shard ${shardId} disconnected (code ${event.code}).`);
+  console.warn(`[SHARD ${shardId}] Disconnected (code ${event.code}).`);
 });
 
-initializeJoinDM()
-  .then(async () => {
-    console.log("Database initialized. Checking Discord API connectivity...");
-    try {
-      const response = await fetch("https://discord.com/api/v10/gateway", {
-        signal: AbortSignal.timeout(10000)
-      });
-      console.log(`Discord API connectivity: HTTP ${response.status}`);
-    } catch (error) {
-      console.error("Discord API connectivity failed:", error);
-    }
-    console.log("Database initialized. Attempting Discord login...");
-    const timeout = setTimeout(() => {
-      console.error("Discord login has not completed after 30 seconds.");
-    }, 30000);
-    try {
-      await client.login(process.env.DISCORD_TOKEN);
-      console.log("Discord login request completed.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  })
-  .catch(error => {
-    console.error("Discord startup/login failed:", error);
-  });
+client.on("shardReconnecting", shardId => {
+  console.log(`[SHARD ${shardId}] Reconnecting...`);
+});
+
+client.on("shardReady", shardId => {
+  console.log(`[SHARD ${shardId}] Ready.`);
+});
+
+client.on("shardResume", (shardId, replayedEvents) => {
+  console.log(`[SHARD ${shardId}] Resumed (${replayedEvents} events replayed).`);
+});
+
+// The database must not prevent Discord from logging in.
+// Join DM commands will report unavailable storage until it is ready.
+initializeJoinDM().catch(error => {
+  console.error("[DATABASE] Join DM initialization failed:", error);
+});
+
+async function startDiscord() {
+  console.log("[STARTUP] Attempting Discord login...");
+  const warning = setTimeout(() => {
+    console.warn("[STARTUP] Discord login is still pending after 60 seconds. Check gateway errors, rate limits, and duplicate bot instances.");
+  }, 60000);
+
+  try {
+    await client.login(process.env.DISCORD_TOKEN);
+    console.log("[STARTUP] Discord login request completed.");
+  } catch (error) {
+    console.error("[STARTUP] Discord login failed:", error);
+    // Do not spin in a retry loop when Discord is rate limiting the service.
+    process.exitCode = 1;
+  } finally {
+    clearTimeout(warning);
+  }
+}
+
+startDiscord();

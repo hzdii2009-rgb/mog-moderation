@@ -1069,7 +1069,7 @@ function parseDuration(input) {
 // READY
 // =====================================================
 
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   client.user.setActivity("Monitoring the server", { type: ActivityType.Watching });
@@ -2090,6 +2090,12 @@ client.on(
 // =====================================================
 
 client.on("interactionCreate", async interaction => {
+  const interactionStart = Date.now();
+  const interactionLabel = interaction.isChatInputCommand()
+    ? `/${interaction.commandName}`
+    : interaction.isButton() ? `button:${interaction.customId}` : "other";
+  console.log(`[INTERACTION] Received ${interactionLabel} id=${interaction.id}`);
+  try {
   // Payment commands are allowed in the authorised server or through a User Install.
   const paymentAllowed = interaction.guildId === "1520043179607461961" ||
     Boolean(interaction.authorizingIntegrationOwners?.get?.(1) ??
@@ -2226,19 +2232,20 @@ client.on("interactionCreate", async interaction => {
       connection.destroy();
       return interaction.reply({ embeds: [successEmbed("Disconnected", "I left the voice channel.")] });
     }
+    // Acknowledge immediately, before any Discord REST/cache lookup.
+    await interaction.deferReply({ ephemeral: true });
     const voiceChannel = interaction.guild.members.cache.get(interaction.user.id)?.voice?.channel
       || (await interaction.guild.members.fetch(interaction.user.id).catch(() => null))?.voice?.channel;
-    if (!voiceChannel) return interaction.reply({ embeds: [errorEmbed("Join Voice First", "Join a voice channel before using `/connect`.")], ephemeral: true });
+    if (!voiceChannel) return interaction.editReply({ embeds: [errorEmbed("Join Voice First", "Join a voice channel before using `/connect`.")], ephemeral: true });
     const me = interaction.guild.members.me || await interaction.guild.members.fetchMe();
     const perms = voiceChannel.permissionsFor(me);
     if (!perms?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect])) {
-      return interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need View Channel and Connect permissions in your voice channel.")], ephemeral: true });
+      return interaction.editReply({ embeds: [errorEmbed("Missing Permission", "I need View Channel and Connect permissions in your voice channel.")], ephemeral: true });
     }
     const existing = getVoiceConnection(interaction.guildId);
     if (existing && existing.state.status !== VoiceConnectionStatus.Destroyed) {
-      return interaction.reply({ embeds: [errorEmbed("Already Connected", "I'm already connected in this server. Use `/disconnect` before moving me.")], ephemeral: true });
+      return interaction.editReply({ embeds: [errorEmbed("Already Connected", "I'm already connected in this server. Use `/disconnect` before moving me.")], ephemeral: true });
     }
-    await interaction.deferReply({ ephemeral: true });
     try {
       const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
@@ -2255,7 +2262,7 @@ client.on("interactionCreate", async interaction => {
       connection.on("error", error => {
         console.error("[VOICE ERROR]", error);
       });
-      await entersState(connection, VoiceConnectionStatus.Ready, 60000);
+      await entersState(connection, VoiceConnectionStatus.Ready, 15000);
       return interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use /disconnect or the bot restarts, unless Discord disconnects me.`)] });
     } catch (error) {
       console.error("Voice connection failed:", error);
@@ -3792,6 +3799,22 @@ client.on("interactionCreate", async interaction => {
       ]
     });
   }
+  } catch (error) {
+    console.error(`[INTERACTION] ${interactionLabel} failed:`, error);
+    try {
+      const payload = { content: "Something went wrong while processing this command. Please try again.", allowedMentions: { parse: [] } };
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ ...payload, ephemeral: true });
+      } else if (interaction.isRepliable()) {
+        await interaction.reply({ ...payload, ephemeral: true });
+      }
+    } catch (responseError) {
+      console.error(`[INTERACTION] Could not report ${interactionLabel} failure:`, responseError);
+    }
+  } finally {
+    const elapsed = Date.now() - interactionStart;
+    console.log(`[INTERACTION] Finished ${interactionLabel} in ${elapsed}ms; acknowledged=${interaction.deferred || interaction.replied}`);
+  }
 });
 
 // Send a moderation notice without preventing the moderation action if DMs are blocked.
@@ -5266,6 +5289,22 @@ client.on("shardReady", shardId => {
 
 client.on("shardResume", (shardId, replayedEvents) => {
   console.log(`[SHARD ${shardId}] Resumed (${replayedEvents} events replayed).`);
+});
+
+// Monitor gateway responsiveness and event-loop stalls. The web server can remain
+// live even when Discord is disconnected or Node is under heavy load.
+let lastHealthTick = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const lagMs = Math.max(0, now - lastHealthTick - 30000);
+  lastHealthTick = now;
+  const wsPing = client.ws?.ping;
+  console.log(`[HEALTH] discord=${client.isReady() ? "ready" : "offline"} ping=${Number.isFinite(wsPing) ? wsPing : "n/a"}ms eventLoopLag=${lagMs}ms`);
+  if (lagMs > 3000) console.warn(`[HEALTH] Event loop was delayed by ${lagMs}ms; commands may time out.`);
+}, 30000).unref();
+
+process.on("unhandledRejection", error => {
+  console.error("[UNHANDLED PROMISE REJECTION]", error);
 });
 
 // The database must not prevent Discord from logging in.

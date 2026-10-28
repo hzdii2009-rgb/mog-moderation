@@ -31,6 +31,7 @@ const WARNINGS_FILE = path.join(__dirname, "warnings.json");
 const JOINDM_FILE = path.join(__dirname, "joindm.json");
 const MESSAGE_LOGS_FILE = path.join(__dirname, "messagelogs.json");
 const MOD_LOGS_FILE = path.join(__dirname, "modlogs.json");
+const VOICE_CHANNELS_FILE = path.join(__dirname, "voicechannels.json");
 
 const client = new Client({
   intents: [
@@ -75,6 +76,7 @@ ensureFile(WARNINGS_FILE, {});
 ensureFile(JOINDM_FILE, {});
 ensureFile(MESSAGE_LOGS_FILE, {});
 ensureFile(MOD_LOGS_FILE, {});
+ensureFile(VOICE_CHANNELS_FILE, {});
 
 // =====================================================
 // WARNINGS
@@ -130,6 +132,111 @@ const { Pool } = require("pg");
 const joinDMPool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 10000 })
   : null;
+// =====================================================
+// VOICE CHANNEL RESTORE: PostgreSQL is required for reliable
+// persistence across Render redeploys. Local JSON is a fallback
+// for installations with a persistent filesystem.
+// =====================================================
+let voiceDBReady = false;
+let voiceStorageLoaded = false;
+let voiceRestoreStarted = false;
+let desiredVoiceChannels = {};
+try { desiredVoiceChannels = JSON.parse(fs.readFileSync(VOICE_CHANNELS_FILE, "utf8")) || {}; }
+catch (error) { console.warn("[VOICE RESTORE] Could not load local voice settings:", error.message); }
+
+function saveVoiceLocal() {
+  try { fs.writeFileSync(VOICE_CHANNELS_FILE, JSON.stringify(desiredVoiceChannels, null, 2)); }
+  catch (error) { console.error("[VOICE RESTORE] Local save failed:", error); }
+}
+
+async function initializeVoiceStorage() {
+  if (!joinDMPool) {
+    console.warn("[VOICE RESTORE] DATABASE_URL not set; Render redeploys may lose remembered channels.");
+    voiceStorageLoaded = true;
+    return;
+  }
+  try {
+    await joinDMPool.query(`CREATE TABLE IF NOT EXISTS mog_voice_channels (
+      guild_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL
+    )`);
+    const result = await joinDMPool.query("SELECT guild_id, channel_id FROM mog_voice_channels");
+    // The database is authoritative. Do not overwrite its state with stale ephemeral files.
+    desiredVoiceChannels = Object.fromEntries(result.rows.map(r => [r.guild_id, r.channel_id]));
+    voiceDBReady = true;
+    saveVoiceLocal();
+    console.log(`[VOICE RESTORE] Loaded ${result.rowCount} saved voice connections.`);
+  } catch (error) {
+    console.error("[VOICE RESTORE] PostgreSQL initialization failed:", error);
+  } finally { voiceStorageLoaded = true; }
+}
+
+async function rememberVoiceChannel(guildId, channelId) {
+  if (joinDMPool && !voiceDBReady) throw new Error("Voice database not ready; cannot guarantee restoration");
+  if (voiceDBReady) {
+    await joinDMPool.query(`INSERT INTO mog_voice_channels (guild_id, channel_id)
+      VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id`,
+      [guildId, channelId]);
+  }
+  desiredVoiceChannels[guildId] = channelId;
+  saveVoiceLocal();
+}
+
+async function forgetVoiceChannel(guildId) {
+  if (joinDMPool && !voiceDBReady) throw new Error("Voice database not ready; cannot guarantee disconnect persists");
+  if (voiceDBReady) await joinDMPool.query("DELETE FROM mog_voice_channels WHERE guild_id = $1", [guildId]);
+  delete desiredVoiceChannels[guildId];
+  saveVoiceLocal();
+}
+
+function makeVoiceConnection(guild, channel) {
+  const connection = joinVoiceChannel({
+    channelId: channel.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true,
+    selfMute: false
+  });
+  connection.on("stateChange", (previous, next) => {
+    console.log(`[VOICE] guild=${guild.id} ${previous.status} -> ${next.status}`);
+  });
+  connection.on("error", error => console.error(`[VOICE ERROR] guild=${guild.id}`, error));
+  return connection;
+}
+
+async function restoreVoiceConnections() {
+  if (voiceRestoreStarted || !client.isReady() || !voiceStorageLoaded) return;
+  voiceRestoreStarted = true;
+  const entries = Object.entries(desiredVoiceChannels);
+  for (const [guildId, channelId] of entries) {
+    try {
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) { console.warn(`[VOICE RESTORE] Not in guild ${guildId}; skipping.`); continue; }
+      const channel = await guild.channels.fetch(channelId).catch(() => null);
+      if (!channel || !channel.isVoiceBased()) {
+        console.warn(`[VOICE RESTORE] Channel ${channelId} unavailable; removing saved target.`);
+        await forgetVoiceChannel(guildId);
+        continue;
+      }
+      const me = guild.members.me || await guild.members.fetchMe();
+      const perms = channel.permissionsFor(me);
+      if (!perms?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect])) {
+        console.warn(`[VOICE RESTORE] Missing voice permissions in ${guildId}/${channelId}.`);
+        continue;
+      }
+      const existing = getVoiceConnection(guildId);
+      if (existing && existing.state.status !== VoiceConnectionStatus.Destroyed) continue;
+      const connection = makeVoiceConnection(guild, channel);
+      try {
+        await entersState(connection, VoiceConnectionStatus.Ready, 15000);
+        console.log(`[VOICE RESTORE] Rejoined guild=${guildId} channel=${channelId}`);
+      } catch (error) {
+        console.error(`[VOICE RESTORE] Could not rejoin ${guildId}/${channelId}:`, error);
+        connection.destroy();
+      }
+    } catch (error) { console.error(`[VOICE RESTORE] Error restoring guild ${guildId}:`, error); }
+  }
+}
+
 let joinDMReady = false;
 let joinDM = {};
 
@@ -1127,6 +1234,7 @@ function parseDuration(input) {
 
 client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  restoreVoiceConnections().catch(error => console.error("[VOICE RESTORE]", error));
 
   client.user.setActivity("Monitoring the server", { type: ActivityType.Watching });
 
@@ -2285,8 +2393,13 @@ client.on("interactionCreate", async interaction => {
     if (command === "disconnect") {
       const connection = getVoiceConnection(interaction.guildId);
       if (!connection) return await interaction.reply({ embeds: [errorEmbed("Not Connected", "I'm not connected to a voice channel in this server.")], ephemeral: true });
+      try { await forgetVoiceChannel(interaction.guildId); }
+      catch (error) {
+        console.error("[VOICE RESTORE] Could not save disconnect:", error);
+        return await interaction.reply({ embeds: [errorEmbed("Storage Error", "Could not save the disconnect. Try again when the database is available.")], flags: 64 });
+      }
       connection.destroy();
-      return await interaction.reply({ embeds: [successEmbed("Disconnected", "I left the voice channel.")] });
+      return await interaction.reply({ embeds: [successEmbed("Disconnected", "I left the voice channel and won't automatically rejoin after redeploy.")] });
     }
     // Acknowledge immediately, before any Discord REST/cache lookup.
     await interaction.deferReply({ ephemeral: true });
@@ -2303,23 +2416,15 @@ client.on("interactionCreate", async interaction => {
       return await interaction.editReply({ embeds: [errorEmbed("Already Connected", "I'm already connected in this server. Use `/disconnect` before moving me.")] });
     }
     try {
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: interaction.guildId,
-        adapterCreator: interaction.guild.voiceAdapterCreator,
-        selfDeaf: true,
-        selfMute: false
-      });
-      // Diagnostic logging for the Discord voice handshake.
+      const connection = makeVoiceConnection(interaction.guild, voiceChannel);
       console.log(`[VOICE] Starting connection in guild ${interaction.guildId}, channel ${voiceChannel.id}`);
-      connection.on("stateChange", (oldState, newState) => {
-        console.log(`[VOICE] ${oldState.status} -> ${newState.status}`);
-      });
-      connection.on("error", error => {
-        console.error("[VOICE ERROR]", error);
-      });
       await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-      return await interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use /disconnect or the bot restarts, unless Discord disconnects me.`)] });
+      try { await rememberVoiceChannel(interaction.guildId, voiceChannel.id); }
+      catch (saveError) {
+        console.error("[VOICE RESTORE] Connection succeeded but saving failed:", saveError);
+        return await interaction.editReply({ embeds: [successEmbed("Connected (Not Saved)", `Joined ${voiceChannel}, but couldn't save the channel for redeploy restoration. Check PostgreSQL in Render.`)] });
+      }
+      return await interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll try to rejoin this channel automatically after redeploying. Use /disconnect to stop.`)] });
     } catch (error) {
       console.error("Voice connection failed:", error);
       getVoiceConnection(interaction.guildId)?.destroy();
@@ -3886,7 +3991,11 @@ client.on("interactionCreate", async interaction => {
     }
   } finally {
     const elapsed = Date.now() - interactionStart;
-    console.log(`[INTERACTION] Finished ${interactionLabel} in ${elapsed}ms; acknowledged=${interaction.deferred || interaction.replied}`);
+    const acknowledged = interaction.deferred || interaction.replied;
+    console.log(`[INTERACTION] Finished ${interactionLabel} in ${elapsed}ms; acknowledged=${acknowledged}`);
+    if (interaction.isChatInputCommand() && !acknowledged) {
+      console.error(`[INTERACTION] UNACKNOWLEDGED ${interactionLabel}: command handler returned without replying. Check command routing and registration.`);
+    }
   }
 });
 
@@ -5321,7 +5430,9 @@ app.get("/health", (req, res) => {
   res.status(client.isReady() ? 200 : 503).json({
     web: "running",
     discord: client.isReady() ? "connected" : "disconnected",
-    guilds: client.isReady() ? client.guilds.cache.size : 0
+    guilds: client.isReady() ? client.guilds.cache.size : 0,
+    savedVoiceConnections: Object.keys(desiredVoiceChannels).length,
+    voiceRestoreStorage: voiceDBReady ? "postgres" : "local-only"
   });
 });
 
@@ -5388,6 +5499,9 @@ initializeJoinDM().catch(error => {
 initializeModLogStorage().catch(error => {
   console.error('[DATABASE] Moderation log initialization failed:', error);
 });
+initializeVoiceStorage().then(() => {
+  if (client.isReady()) restoreVoiceConnections().catch(error => console.error("[VOICE RESTORE]", error));
+}).catch(error => console.error("[VOICE RESTORE] Storage init failed:", error));
 
 async function startDiscord() {
   console.log("[STARTUP] Attempting Discord login...");

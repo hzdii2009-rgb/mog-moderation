@@ -203,6 +203,49 @@ function saveModLogSettings() {
   catch (error) { console.error("Could not save moderation log settings:", error); }
 }
 
+// Persist log configuration on Render. The local JSON file remains a fallback.
+let modLogDBReady = false;
+async function initializeModLogStorage() {
+  if (!joinDMPool) {
+    console.warn('[MOD LOGS] DATABASE_URL missing; settings use non-persistent local JSON.');
+    return;
+  }
+  try {
+    await joinDMPool.query(`CREATE TABLE IF NOT EXISTS mog_mod_log_settings (
+      guild_id TEXT PRIMARY KEY,
+      enabled BOOLEAN NOT NULL,
+      channel_id TEXT
+    )`);
+    const rows = await joinDMPool.query('SELECT guild_id, enabled, channel_id FROM mog_mod_log_settings');
+    for (const row of rows.rows) {
+      modLogSettings[row.guild_id] = { enabled: row.enabled, channelId: row.channel_id };
+    }
+    modLogDBReady = true;
+    console.log(`[MOD LOGS] Persistent settings loaded (${rows.rowCount} servers).`);
+  } catch (error) {
+    console.error('[MOD LOGS] Database setup failed; using local fallback:', error);
+  }
+}
+async function setModLogSettings(guildId, settings) {
+  if (joinDMPool && !modLogDBReady) throw new Error('Moderation log database is not ready');
+  if (modLogDBReady) {
+    await joinDMPool.query(`INSERT INTO mog_mod_log_settings (guild_id, enabled, channel_id)
+      VALUES ($1, $2, $3) ON CONFLICT (guild_id) DO UPDATE
+      SET enabled = EXCLUDED.enabled, channel_id = EXCLUDED.channel_id`,
+      [guildId, settings.enabled !== false, settings.channelId || null]);
+  }
+  modLogSettings[guildId] = settings;
+  saveModLogSettings();
+}
+
+function getModLogChannel(guild) {
+  if (!guild) return null;
+  const configuredId = modLogSettings[guild.id]?.channelId;
+  const configured = configuredId && guild.channels.cache.get(configuredId);
+  if (configured?.isTextBased() && !configured.isThread()) return configured;
+  return guild.channels.cache.find(ch => ch.name === LOG_CHANNEL_NAME && ch.isTextBased() && !ch.isThread()) || null;
+}
+
 let messageLogSettings = {};
 try {
   messageLogSettings = JSON.parse(fs.readFileSync(MESSAGE_LOGS_FILE, "utf8")) || {};
@@ -512,19 +555,32 @@ function botCanManageRole(guild, role) {
 
 async function sendLog(guild, embed) {
   try {
-    const settings = modLogSettings[guild.id];
-    if (settings?.enabled === false) return;
-    const channel = settings?.channelId
-      ? guild.channels.cache.get(settings.channelId)
-      : guild.channels.cache.find(ch => ch.name === LOG_CHANNEL_NAME && ch.isTextBased());
-
-    if (!channel?.isTextBased() || channel.isThread()) return;
-
-    await channel.send({
-      embeds: [embed]
-    });
+    if (!guild) return false;
+    if (modLogSettings[guild.id]?.enabled === false) {
+      console.log(`[MOD LOGS] Disabled in guild ${guild.id}`);
+      return false;
+    }
+    const channel = getModLogChannel(guild);
+    if (!channel) {
+      console.warn(`[MOD LOGS] No valid channel in guild ${guild.id}; create #${LOG_CHANNEL_NAME} or use /setlogs.`);
+      return false;
+    }
+    const me = guild.members.me;
+    const permissions = me && channel.permissionsFor(me);
+    if (permissions && !permissions.has([
+      PermissionsBitField.Flags.ViewChannel,
+      PermissionsBitField.Flags.SendMessages,
+      PermissionsBitField.Flags.EmbedLinks
+    ])) {
+      console.warn(`[MOD LOGS] Missing permissions in #${channel.name} (${channel.id}).`);
+      return false;
+    }
+    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+    console.log(`[MOD LOGS] Sent to #${channel.name} (${channel.id}) in ${guild.id}`);
+    return true;
   } catch (error) {
-    console.error("Could not send moderation log:", error);
+    console.error(`[MOD LOGS] Failed in guild ${guild?.id}:`, error);
+    return false;
   }
 }
 
@@ -2103,14 +2159,14 @@ client.on("interactionCreate", async interaction => {
 
   if (interaction.isButton() && ["mog_copy_ltc", "mog_copy_pp"].includes(interaction.customId)) {
     if (!paymentAllowed) {
-      return interaction.reply({ content: "This button is only available in the authorised server or through My Apps.", ephemeral: true });
+      return await interaction.reply({ content: "This button is only available in the authorised server or through My Apps.", ephemeral: true });
     }
 
     const copyText = interaction.customId === "mog_copy_ltc"
       ? "LfSz3uX1ksZi8SHZpEeNAENTnF7KmhmDwe"
       : "https://www.paypal.me/Hadiakbari105";
 
-    return interaction.reply({
+    return await interaction.reply({
       content: copyText,
       ephemeral: true
     });
@@ -2129,7 +2185,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "ltc" || command === "pp") {
     if (!paymentAllowed) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Server Restricted",
@@ -2158,7 +2214,7 @@ client.on("interactionCreate", async interaction => {
           .setStyle(ButtonStyle.Primary)
       );
 
-      return interaction.reply({ embeds: [embed], components: [buttons] });
+      return await interaction.reply({ embeds: [embed], components: [buttons] });
     }
 
     const embed = baseEmbed(0x0070BA)
@@ -2178,12 +2234,12 @@ client.on("interactionCreate", async interaction => {
         .setStyle(ButtonStyle.Primary)
     );
 
-    return interaction.reply({ embeds: [embed], components: [buttons] });
+    return await interaction.reply({ embeds: [embed], components: [buttons] });
   }
 
   // All other commands remain server-only.
   if (!interaction.guild) {
-    return interaction.reply({
+    return await interaction.reply({
       embeds: [errorEmbed("Server Only", "This command can only be used inside a server.")],
       ephemeral: true
     });
@@ -2195,18 +2251,18 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "setmessagelogs" || command === "messagelogs") {
     if (!isModerator(member)) {
-      return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure message logs.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure message logs.")], ephemeral: true });
     }
     if (command === "setmessagelogs") {
       const channel = interaction.options.getChannel("channel");
       const bot = interaction.guild.members.me;
       const permissions = channel.permissionsFor(bot);
       if (!permissions?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks])) {
-        return interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need View Channel, Send Messages and Embed Links in that channel.")], ephemeral: true });
+        return await interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need View Channel, Send Messages and Embed Links in that channel.")], ephemeral: true });
       }
       messageLogSettings[interaction.guildId] = { enabled: true, channelId: channel.id };
       saveMessageLogSettings();
-      return interaction.reply({ embeds: [successEmbed("Message Logs Enabled", `Deleted and edited messages will be logged in ${channel}.`)], ephemeral: true });
+      return await interaction.reply({ embeds: [successEmbed("Message Logs Enabled", `Deleted and edited messages will be logged in ${channel}.`)], ephemeral: true });
     }
     const action = interaction.options.getString("action");
     const current = messageLogSettings[interaction.guildId] || {};
@@ -2214,9 +2270,9 @@ client.on("interactionCreate", async interaction => {
     saveMessageLogSettings();
     const channel = getMessageLogChannel(interaction.guild);
     if (action === "on" && !channel) {
-      return interaction.reply({ embeds: [errorEmbed("Logging Channel Missing", "Logging was enabled, but I couldn't find its channel. Create #message-logs or use /setmessagelogs.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Logging Channel Missing", "Logging was enabled, but I couldn't find its channel. Create #message-logs or use /setmessagelogs.")], ephemeral: true });
     }
-    return interaction.reply({ embeds: [successEmbed("Message Logs", action === "on" ? `Message logging is now enabled in ${channel}.` : "Message logging is now disabled.")], ephemeral: true });
+    return await interaction.reply({ embeds: [successEmbed("Message Logs", action === "on" ? `Message logging is now enabled in ${channel}.` : "Message logging is now disabled.")], ephemeral: true });
   }
 
   // ===================================================
@@ -2224,27 +2280,27 @@ client.on("interactionCreate", async interaction => {
   // ===================================================
   if (command === "connect" || command === "disconnect") {
     if (!isModerator(member)) {
-      return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can control voice connections.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can control voice connections.")], ephemeral: true });
     }
     if (command === "disconnect") {
       const connection = getVoiceConnection(interaction.guildId);
-      if (!connection) return interaction.reply({ embeds: [errorEmbed("Not Connected", "I'm not connected to a voice channel in this server.")], ephemeral: true });
+      if (!connection) return await interaction.reply({ embeds: [errorEmbed("Not Connected", "I'm not connected to a voice channel in this server.")], ephemeral: true });
       connection.destroy();
-      return interaction.reply({ embeds: [successEmbed("Disconnected", "I left the voice channel.")] });
+      return await interaction.reply({ embeds: [successEmbed("Disconnected", "I left the voice channel.")] });
     }
     // Acknowledge immediately, before any Discord REST/cache lookup.
     await interaction.deferReply({ ephemeral: true });
     const voiceChannel = interaction.guild.members.cache.get(interaction.user.id)?.voice?.channel
       || (await interaction.guild.members.fetch(interaction.user.id).catch(() => null))?.voice?.channel;
-    if (!voiceChannel) return interaction.editReply({ embeds: [errorEmbed("Join Voice First", "Join a voice channel before using `/connect`.")], ephemeral: true });
+    if (!voiceChannel) return await interaction.editReply({ embeds: [errorEmbed("Join Voice First", "Join a voice channel before using `/connect`.")] });
     const me = interaction.guild.members.me || await interaction.guild.members.fetchMe();
     const perms = voiceChannel.permissionsFor(me);
     if (!perms?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.Connect])) {
-      return interaction.editReply({ embeds: [errorEmbed("Missing Permission", "I need View Channel and Connect permissions in your voice channel.")], ephemeral: true });
+      return await interaction.editReply({ embeds: [errorEmbed("Missing Permission", "I need View Channel and Connect permissions in your voice channel.")] });
     }
     const existing = getVoiceConnection(interaction.guildId);
     if (existing && existing.state.status !== VoiceConnectionStatus.Destroyed) {
-      return interaction.editReply({ embeds: [errorEmbed("Already Connected", "I'm already connected in this server. Use `/disconnect` before moving me.")], ephemeral: true });
+      return await interaction.editReply({ embeds: [errorEmbed("Already Connected", "I'm already connected in this server. Use `/disconnect` before moving me.")] });
     }
     try {
       const connection = joinVoiceChannel({
@@ -2263,11 +2319,11 @@ client.on("interactionCreate", async interaction => {
         console.error("[VOICE ERROR]", error);
       });
       await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-      return interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use /disconnect or the bot restarts, unless Discord disconnects me.`)] });
+      return await interaction.editReply({ embeds: [successEmbed("Connected", `Joined ${voiceChannel}. I'll stay until you use /disconnect or the bot restarts, unless Discord disconnects me.`)] });
     } catch (error) {
       console.error("Voice connection failed:", error);
       getVoiceConnection(interaction.guildId)?.destroy();
-      return interaction.editReply({ embeds: [errorEmbed("Connection Failed", "Couldn't join voice. Check Connect permissions and Render logs.")] });
+      return await interaction.editReply({ embeds: [errorEmbed("Connection Failed", "Couldn't join voice. Check Connect permissions and Render logs.")] });
     }
   }
 
@@ -2275,25 +2331,40 @@ client.on("interactionCreate", async interaction => {
   // MODERATION LOG CONFIGURATION (PER SERVER)
   // ===================================================
   if (command === "setlogs" || command === "logs") {
-    if (!isModerator(member)) return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure moderation logs.")], ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
+    if (!isModerator(member)) return await interaction.editReply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can configure moderation logs.")] });
     if (command === "setlogs") {
       const channel = interaction.options.getChannel("channel");
-      const perms = channel.permissionsFor(interaction.guild.members.me);
+      const me = interaction.guild.members.me || await interaction.guild.members.fetchMe();
+      const perms = channel?.permissionsFor(me);
       if (!perms?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks])) {
-        return interaction.reply({ embeds: [errorEmbed("Missing Permissions", "I need View Channel, Send Messages and Embed Links in that channel.")], ephemeral: true });
+        return await interaction.editReply({ embeds: [errorEmbed("Missing Permissions", "I need View Channel, Send Messages and Embed Links in that channel.")] });
       }
-      modLogSettings[interaction.guildId] = { enabled: true, channelId: channel.id };
-      saveModLogSettings();
-      return interaction.reply({ embeds: [successEmbed("Moderation Logs Enabled", `Moderation and audit logs will be sent to ${channel}.`)], ephemeral: true });
+      try {
+        await setModLogSettings(interaction.guildId, { enabled: true, channelId: channel.id });
+      } catch (error) {
+        console.error('[MOD LOGS] Could not save settings:', error);
+        return await interaction.editReply({ embeds: [errorEmbed("Storage Error", "Could not save moderation log settings. Check Render logs.")] });
+      }
+      const testSent = await sendLog(interaction.guild, successEmbed('Moderation Logging Test', `Logging configured by ${interaction.user}.`));
+      return await interaction.editReply({ embeds: [testSent
+        ? successEmbed("Moderation Logs Enabled", `A test log was sent to ${channel}.`)
+        : errorEmbed("Log Delivery Failed", `Configured ${channel}, but the test log failed. Check Render logs for [MOD LOGS].`)] });
     }
     const enabled = interaction.options.getString("action") === "on";
     const current = modLogSettings[interaction.guildId] || {};
-    const channel = current.channelId ? interaction.guild.channels.cache.get(current.channelId)
-      : interaction.guild.channels.cache.find(ch => ch.name === LOG_CHANNEL_NAME && ch.isTextBased());
-    if (enabled && !channel) return interaction.reply({ embeds: [errorEmbed("Channel Missing", "Create #mod-logs or use `/setlogs` first.")], ephemeral: true });
-    modLogSettings[interaction.guildId] = { ...current, enabled };
-    saveModLogSettings();
-    return interaction.reply({ embeds: [successEmbed("Moderation Logs", enabled ? `Moderation logs are enabled in ${channel}.` : "Moderation logs are disabled.")], ephemeral: true });
+    const channel = getModLogChannel(interaction.guild);
+    if (enabled && !channel) return await interaction.editReply({ embeds: [errorEmbed("Channel Missing", "Create #mod-logs or use `/setlogs` first.")] });
+    try {
+      await setModLogSettings(interaction.guildId, { ...current, enabled, channelId: channel?.id || current.channelId || null });
+    } catch (error) {
+      console.error('[MOD LOGS] Could not save settings:', error);
+      return await interaction.editReply({ embeds: [errorEmbed("Storage Error", "Could not save moderation log settings. Check Render logs.")] });
+    }
+    const testSent = enabled ? await sendLog(interaction.guild, successEmbed('Moderation Logging Test', `Logging enabled by ${interaction.user}.`)) : false;
+    return await interaction.editReply({ embeds: [enabled && !testSent
+      ? errorEmbed("Log Delivery Failed", `Logging is enabled but I couldn't send a test log to ${channel}. Check Render logs.`)
+      : successEmbed("Moderation Logs", enabled ? `Moderation logs enabled; test message sent to ${channel}.` : "Moderation logs are disabled.")] });
   }
 
   // ===================================================
@@ -2302,28 +2373,28 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "purge" || command === "cleanup") {
     if (!isModerator(member)) {
-      return interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can use this command.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Access Denied", "Only the server owner and administrators can use this command.")], ephemeral: true });
     }
     const channel = interaction.channel;
     const botPermissions = channel.permissionsFor(interaction.guild.members.me);
     if (!channel || !channel.messages || !botPermissions?.has(PermissionsBitField.Flags.ManageMessages)) {
-      if (command === "purge") return interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need Manage Messages in a text channel.")], ephemeral: true });
+      if (command === "purge") return await interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need Manage Messages in a text channel.")], ephemeral: true });
     }
     if (command === "purge") {
       if (!channel?.messages || !botPermissions?.has([PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageMessages])) {
-        return interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need View Channel, Read Message History and Manage Messages.")], ephemeral: true });
+        return await interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need View Channel, Read Message History and Manage Messages.")], ephemeral: true });
       }
       await interaction.deferReply({ ephemeral: true });
       try {
         const deleted = await purgeRecentMessages(channel, interaction.options.getInteger("amount"));
-        return interaction.editReply({ embeds: [successEmbed("Purge Complete", `Deleted **${deleted}** messages. Messages older than 14 days cannot be bulk-deleted.`)] });
+        return await interaction.editReply({ embeds: [successEmbed("Purge Complete", `Deleted **${deleted}** messages. Messages older than 14 days cannot be bulk-deleted.`)] });
       } catch (error) {
         console.error("Purge failed:", error);
-        return interaction.editReply({ embeds: [errorEmbed("Purge Failed", "Check my Manage Messages and Read Message History permissions.")] });
+        return await interaction.editReply({ embeds: [errorEmbed("Purge Failed", "Check my Manage Messages and Read Message History permissions.")] });
       }
     }
     if (!channel?.clone || !botPermissions?.has(PermissionsBitField.Flags.ManageChannels) || !interaction.guild.members.me.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
-      return interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need Manage Channels to recreate this channel.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Missing Permission", "I need Manage Channels to recreate this channel.")], ephemeral: true });
     }
     await interaction.reply({ embeds: [successEmbed("Channel Cleanup", "Recreating this channel in the same category with its original permissions.")], ephemeral: true });
     try {
@@ -2346,7 +2417,7 @@ client.on("interactionCreate", async interaction => {
       .setTitle(`🖼️ ${user.username}'s Avatar`)
       .setDescription(`[View full-size avatar](${avatar})`)
       .setImage(avatar);
-    return interaction.reply({ embeds: [embed] });
+    return await interaction.reply({ embeds: [embed] });
   }
 
   // ===================================================
@@ -2364,7 +2435,7 @@ client.on("interactionCreate", async interaction => {
         { name: "Started At", value: `<t:${startedAt}:F>`, inline: false }
       );
 
-    return interaction.reply({ embeds: [embed] });
+    return await interaction.reply({ embeds: [embed] });
   }
 
   // ===================================================
@@ -2373,7 +2444,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "commands") {
     if (!isModerator(member)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Access Denied",
@@ -2447,7 +2518,7 @@ client.on("interactionCreate", async interaction => {
         text: "Mog Moderation • Owner/Admin Command"
       });
 
-    return interaction.reply({
+    return await interaction.reply({
       embeds: [embed],
       ephemeral: true
     });
@@ -2474,7 +2545,7 @@ client.on("interactionCreate", async interaction => {
     ].includes(command)
   ) {
     if (!isModerator(member)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Access Denied",
@@ -2498,7 +2569,7 @@ client.on("interactionCreate", async interaction => {
       "No reason provided";
 
     if (!target) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Found",
@@ -2510,7 +2581,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Warn User",
@@ -2520,6 +2591,8 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
     }
+
+    await interaction.deferReply();
 
     const userWarnings = getUserWarnings(
       interaction.guild.id,
@@ -2551,7 +2624,7 @@ client.on("interactionCreate", async interaction => {
       inline: true
     });
 
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [embed]
     });
 
@@ -2598,7 +2671,7 @@ client.on("interactionCreate", async interaction => {
     const target = interaction.options.getMember("user");
 
     if (!target) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Found",
@@ -2610,7 +2683,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Remove Warning",
@@ -2627,7 +2700,7 @@ client.on("interactionCreate", async interaction => {
     );
 
     if (userWarnings.length === 0) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "No Warnings",
@@ -2680,7 +2753,7 @@ client.on("interactionCreate", async interaction => {
       "No reason provided";
 
     if (!target) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Found",
@@ -2692,7 +2765,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Kick User",
@@ -2704,7 +2777,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!botCanModerate(interaction.guild, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -2720,7 +2793,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.KickMembers
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -2801,7 +2874,7 @@ client.on("interactionCreate", async interaction => {
       "No reason provided";
 
     if (!target) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Found",
@@ -2813,7 +2886,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Ban User",
@@ -2825,7 +2898,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!botCanModerate(interaction.guild, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -2841,7 +2914,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.BanMembers
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -2925,7 +2998,7 @@ client.on("interactionCreate", async interaction => {
       "No reason provided";
 
     if (!/^\d{17,20}$/.test(userId)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Invalid User ID",
@@ -2941,7 +3014,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.BanMembers
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -2962,7 +3035,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!bannedUser) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Banned",
@@ -3035,7 +3108,7 @@ client.on("interactionCreate", async interaction => {
         userId
       );
 
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Unban Failed",
@@ -3072,7 +3145,7 @@ client.on("interactionCreate", async interaction => {
     const duration = parseDuration(durationInput);
 
     if (!target) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Found",
@@ -3084,7 +3157,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!duration) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Invalid Duration",
@@ -3096,7 +3169,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (duration > 28 * 24 * 60 * 60 * 1000) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Duration Too Long",
@@ -3108,7 +3181,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Mute User",
@@ -3120,7 +3193,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!botCanModerate(interaction.guild, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -3136,7 +3209,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.ModerateMembers
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -3232,7 +3305,7 @@ client.on("interactionCreate", async interaction => {
       "No reason provided";
 
     if (!target) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Found",
@@ -3244,7 +3317,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Unmute User",
@@ -3256,7 +3329,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!botCanModerate(interaction.guild, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -3272,7 +3345,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.ModerateMembers
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -3284,7 +3357,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!target.communicationDisabledUntilTimestamp) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "User Not Muted",
@@ -3319,7 +3392,7 @@ client.on("interactionCreate", async interaction => {
         target.id
       );
 
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Unmute Failed",
@@ -3361,7 +3434,7 @@ client.on("interactionCreate", async interaction => {
       interaction.options.getRole("role");
 
     if (!target || !role) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Information",
@@ -3373,7 +3446,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Manage User",
@@ -3385,7 +3458,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (role.id === interaction.guild.id) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Invalid Role",
@@ -3397,7 +3470,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (role.managed) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Managed Role",
@@ -3413,7 +3486,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.ManageRoles
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -3425,7 +3498,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!botCanManageRole(interaction.guild, role)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -3440,7 +3513,7 @@ client.on("interactionCreate", async interaction => {
       member.id !== interaction.guild.ownerId &&
       role.position >= member.roles.highest.position
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -3452,7 +3525,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (target.roles.cache.has(role.id)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Already Assigned",
@@ -3490,7 +3563,7 @@ client.on("interactionCreate", async interaction => {
         `${target.id}:${role.id}`
       );
 
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Failed",
@@ -3532,7 +3605,7 @@ client.on("interactionCreate", async interaction => {
       interaction.options.getRole("role");
 
     if (!target || !role) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Information",
@@ -3544,7 +3617,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!canModerate(member, target)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Cannot Manage User",
@@ -3556,7 +3629,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (role.id === interaction.guild.id) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Invalid Role",
@@ -3568,7 +3641,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (role.managed) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Managed Role",
@@ -3584,7 +3657,7 @@ client.on("interactionCreate", async interaction => {
         PermissionsBitField.Flags.ManageRoles
       )
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Missing Permission",
@@ -3596,7 +3669,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!botCanManageRole(interaction.guild, role)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -3611,7 +3684,7 @@ client.on("interactionCreate", async interaction => {
       member.id !== interaction.guild.ownerId &&
       role.position >= member.roles.highest.position
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Hierarchy",
@@ -3623,7 +3696,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (!target.roles.cache.has(role.id)) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Not Found",
@@ -3661,7 +3734,7 @@ client.on("interactionCreate", async interaction => {
         `${target.id}:${role.id}`
       );
 
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Role Removal Failed",
@@ -3703,7 +3776,7 @@ client.on("interactionCreate", async interaction => {
       await setJoinDM(interaction.guild.id, { enabled: true, message });
     } catch (error) {
       console.error("Join DM save failed:", error);
-      return interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Set DATABASE_URL to a persistent PostgreSQL database in Render, then redeploy.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Set DATABASE_URL to a persistent PostgreSQL database in Render, then redeploy.")], ephemeral: true });
     }
 
     const embed = baseEmbed(COLORS.success)
@@ -3716,7 +3789,7 @@ client.on("interactionCreate", async interaction => {
         value: message
       });
 
-    return interaction.reply({
+    return await interaction.reply({
       embeds: [embed]
     });
   }
@@ -3733,7 +3806,7 @@ client.on("interactionCreate", async interaction => {
       !joinDM[interaction.guild.id] ||
       !joinDM[interaction.guild.id].enabled
     ) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Join DM Not Enabled",
@@ -3748,7 +3821,7 @@ client.on("interactionCreate", async interaction => {
       await setJoinDM(interaction.guild.id, { ...joinDM[interaction.guild.id], message });
     } catch (error) {
       console.error("Join DM update failed:", error);
-      return interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")], ephemeral: true });
     }
 
     const embed = baseEmbed(COLORS.success)
@@ -3761,7 +3834,7 @@ client.on("interactionCreate", async interaction => {
         value: message
       });
 
-    return interaction.reply({
+    return await interaction.reply({
       embeds: [embed]
     });
   }
@@ -3772,7 +3845,7 @@ client.on("interactionCreate", async interaction => {
 
   if (command === "stopjoindm") {
     if (!joinDM[interaction.guild.id]) {
-      return interaction.reply({
+      return await interaction.reply({
         embeds: [
           errorEmbed(
             "Join DM Not Enabled",
@@ -3787,10 +3860,10 @@ client.on("interactionCreate", async interaction => {
       await setJoinDM(interaction.guild.id, { ...joinDM[interaction.guild.id], enabled: false });
     } catch (error) {
       console.error("Join DM disable failed:", error);
-      return interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")], ephemeral: true });
+      return await interaction.reply({ embeds: [errorEmbed("Storage Unavailable", "Join DM database could not save this change.")], ephemeral: true });
     }
 
-    return interaction.reply({
+    return await interaction.reply({
       embeds: [
         successEmbed(
           "👋 Join DM Disabled",
@@ -5311,6 +5384,9 @@ process.on("unhandledRejection", error => {
 // Join DM commands will report unavailable storage until it is ready.
 initializeJoinDM().catch(error => {
   console.error("[DATABASE] Join DM initialization failed:", error);
+});
+initializeModLogStorage().catch(error => {
+  console.error('[DATABASE] Moderation log initialization failed:', error);
 });
 
 async function startDiscord() {
